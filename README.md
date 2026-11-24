@@ -30,6 +30,8 @@ public/app.js        frontend: queue, front/back pairing, review list, CSV expor
 | `ANTHROPIC_API_KEY` | Required | Reads the cards in your photos |
 | `APP_PASSWORD` | Strongly recommended | Stops anyone else using your API credit |
 | `IMGBB_API_KEY` | Needed for photos in listings | Hosts your front/back photos |
+| `PULSE_API_KEY` | Needed for Pulse prices | Same PulseTCG key PokeSnipe uses |
+| `PULSE_DAILY_LIMIT` | Optional | Max Pulse lookups per day from PokeLister (default 400) |
 | `POKEMONTCG_API_KEY` | Optional | Higher card-lookup rate limit (free at dev.pokemontcg.io) |
 | `MODEL` | Optional | Defaults to `claude-sonnet-5-5`; `claude-haiku-5-5` is cheaper |
 
@@ -86,6 +88,17 @@ These are stored only on your phone.
 
 Live listings can't be checked on eBay before they go live, so PokeLister is where you review everything. Export asks you to confirm before creating a live-listings file, and blocks the export if any card has no price.
 
+## Pricing rule
+
+Default rule: **listing price = Pulse price − 10%**, never below your **Min £**. Postage is separate; buyers pay it through your postage policy.
+
+- After a card is identified, PokeLister looks up its PulseTCG price (Cardmarket Near Mint, in £), the same way PokeSnipe does.
+- Every card shows the rule as a reminder, e.g. "Rule (set in Settings): Pulse £4.70 − 10% = £4.23". The summary bar and Settings → Pricing show it too.
+- **No Pulse match?** Type the price from the PulseTCG app into **Pulse price £** on the card. The same rule is applied.
+- Pulse is only trusted when it matches both the set and the card number, so a live listing never gets another printing's price.
+- Changing the match re-checks Pulse. Lookups are cached for a day, and PokeLister stops at `PULSE_DAILY_LIMIT` lookups a day, because PokeSnipe uses the same 1,000-credit daily budget.
+- Change the discount, minimum or source (Pulse or Cardmarket) in Settings → Pricing, then tap **Re-apply auto prices** to reprice everything.
+
 ## Uploading to eBay
 
 1. Seller Hub → **Reports** → **Uploads** → **Upload template**, then pick the CSV.
@@ -104,6 +117,6 @@ The template format changes occasionally. In Seller Hub, go to Reports → Uploa
 
 - Lay cards flat in good light, out of toploaders if you can. Glare on holos is the most common cause of misreads.
 - **Check** means the AI wasn't confident, the number didn't match exactly, or it couldn't tell the finish. Reverse holo vs normal is the most common miss.
-- Prices are the Cardmarket trend in € × your rate × multiplier, never lower than your minimum. You can change these in Settings and tap **Re-apply auto prices**. Typing a price by hand stops it from being overwritten.
+- Typing a price by hand stops it from being overwritten. **Apply rule** puts the rule's price back.
 - Cards are saved on your phone (Safari storage) until you clear them, so you can scan in several sessions and export once.
 - Render's free tier sleeps. The first scan after a while can take about 50 seconds while it wakes up.

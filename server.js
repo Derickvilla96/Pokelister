@@ -6,6 +6,8 @@
 //   ANTHROPIC_API_KEY   required — used to read the cards in your photos
 //   APP_PASSWORD        recommended — stops anyone else using your API credit
 //   IMGBB_API_KEY       recommended — hosts your front/back photos so eBay can pull them in
+//   PULSE_API_KEY       recommended — PulseTCG prices (same key as PokeSnipe)
+//   PULSE_DAILY_LIMIT   optional — max Pulse lookups per day from PokeLister (default 400)
 //   POKEMONTCG_API_KEY  optional — free key from dev.pokemontcg.io (higher rate limit)
 //   MODEL               optional — defaults to claude-sonnet-5-5
 //   PORT                set automatically by Render
@@ -21,6 +23,10 @@ const MODEL = process.env.MODEL || 'claude-sonnet-5-5';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const PTCG_KEY = process.env.POKEMONTCG_API_KEY || '';
 const IMGBB_KEY = process.env.IMGBB_API_KEY || '';
+const PULSE_KEY = process.env.PULSE_API_KEY || '';
+const PULSE_SEARCH_URL = 'https://q.pulseapi.dev/api/v1/cards/search';
+// PokeSnipe shares the same 1,000-credit daily budget, so PokeLister stays under its own cap.
+const PULSE_DAILY_LIMIT = Number(process.env.PULSE_DAILY_LIMIT) || 400;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 const PTCG_URL = 'https://api.pokemontcg.io/v2/cards';
@@ -347,6 +353,123 @@ function statusFor(d, candidates) {
   return top.score >= 7 && clearWinner && d.confidence >= 0.6 ? 'ok' : 'check';
 }
 
+// ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
+
+const pulseCache = new Map(); // key -> { at, result }
+const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
+const pulseUsage = { day: '', count: 0 };
+
+function todayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function pulseCreditsLeft() {
+  if (pulseUsage.day !== todayKey()) { pulseUsage.day = todayKey(); pulseUsage.count = 0; }
+  return Math.max(0, PULSE_DAILY_LIMIT - pulseUsage.count);
+}
+
+// Same suffix stripping PokeSnipe uses, so names match Pulse's format.
+function pulseName(name) {
+  return String(name || '').replace(/\b(ex|EX|GX|VMAX|VSTAR|V)\b/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function numPart(s) {
+  const t = String(s || '').toUpperCase().replace(/\s+/g, '');
+  return /^\d+$/.test(t) ? String(parseInt(t, 10)) : t;
+}
+
+// "025/198" and "25/198" count as the same card number
+function sameCardNumber(a, b) {
+  const [a1, a2 = ''] = String(a || '').split('/');
+  const [b1, b2 = ''] = String(b || '').split('/');
+  return numPart(a1) === numPart(b1) && (!a2 || !b2 || numPart(a2) === numPart(b2));
+}
+
+async function pulseSearch(params) {
+  if (pulseCreditsLeft() <= 0) {
+    throw Object.assign(new Error(`Daily Pulse limit (${PULSE_DAILY_LIMIT}) reached — type the price in by hand`), { code: 'limit' });
+  }
+  pulseUsage.count++;
+  const qs = new URLSearchParams({ ...params, exclude_graded: 'true', exclude_conditioned: 'true', limit: '10' });
+  const { ok, status, data } = await fetchJSON(`${PULSE_SEARCH_URL}?${qs}`, { headers: { 'x-api-key': PULSE_KEY } }, 20000);
+  if (!ok) throw new Error(`Pulse search returned ${status}`);
+  return Array.isArray(data && data.data) ? data.data : [];
+}
+
+function pulsePriceOf(r) {
+  const p = (r && r.prices) || {};
+  const nm = p.cm && p.cm.gbp && typeof p.cm.gbp.nm === 'number' ? p.cm.gbp.nm : null;
+  if (nm != null) return { gbp: nm, basis: 'Cardmarket NM' };
+  if (typeof p.market_price === 'number') return { gbp: p.market_price, basis: 'market' };
+  return null;
+}
+
+// Pick the result that matches our set (Pulse product ids look like "card:sv3pt5|199/165|...",
+// using the same set ids as the card database) and card number.
+function pickPulseResult(results, setId, cardNumber) {
+  let best = null;
+  let bestScore = -1;
+  for (const r of results) {
+    if (!pulsePriceOf(r)) continue;
+    let s = 0;
+    const pid = String(r.product_id || '').toLowerCase();
+    if (setId && pid.startsWith(`card:${String(setId).toLowerCase()}|`)) s += 3;
+    if (cardNumber && sameCardNumber(r.card_number, cardNumber)) s += 3;
+    if (s > bestScore) { best = r; bestScore = s; }
+  }
+  // When we know the set, insist on set AND number, so we never price a different printing.
+  if (setId) return bestScore >= 6 ? best : null;
+  // Without a set, accept a number match only if it's unambiguous (one set has that number).
+  const numberMatches = results.filter((r) => pulsePriceOf(r) && cardNumber && sameCardNumber(r.card_number, cardNumber));
+  const sets = new Set(numberMatches.map((r) => String(r.product_id || '').split('|')[0]));
+  return numberMatches.length && sets.size === 1 ? numberMatches[0] : null;
+}
+
+async function pulseLookup({ name, number, total, setId }) {
+  if (!PULSE_KEY) return { status: 'off' };
+  const printed = number ? (total && !/[A-Z]/i.test(number) ? `${number}/${total}` : number) : '';
+  const key = `${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
+  const hit = pulseCache.get(key);
+  if (hit && Date.now() - hit.at < PULSE_CACHE_MS) return hit.result;
+
+  const q = pulseName(name);
+  const tries = [];
+  if (q && printed) tries.push({ q, card_number: printed });
+  if (q && printed && /^0\d/.test(number)) tries.push({ q, card_number: `${numPart(number)}/${total}` }); // 025/198 -> 25/198
+  if (q) tries.push({ q });
+
+  let result = { status: 'nomatch' };
+  for (const params of tries) {
+    const found = await pulseSearch(params);
+    const best = pickPulseResult(found, setId, printed);
+    if (best) {
+      const price = pulsePriceOf(best);
+      result = { status: 'ok', gbp: price.gbp, basis: price.basis, productId: best.product_id || '', cardNumber: best.card_number || '' };
+      break;
+    }
+  }
+  pulseCache.set(key, { at: Date.now(), result });
+  return result;
+}
+
+// Works out what to ask Pulse for, from the database match (preferred) or what the AI read.
+function pulseQueryFor(candidate, detected) {
+  if (candidate) {
+    const printedNum = detected && detected.number && numPart(detected.number) === numPart(candidate.number)
+      ? detected.number : candidate.number;
+    return { name: candidate.name, number: printedNum, total: String(candidate.printedTotal || ''), setId: candidate.setId };
+  }
+  return { name: detected.name, number: detected.number, total: detected.set_total, setId: '' };
+}
+
+async function safePulse(query) {
+  try {
+    return await pulseLookup(query);
+  } catch (e) {
+    return { status: e.code === 'limit' ? 'limit' : 'error', error: e.message };
+  }
+}
+
 // ---------- routes ----------
 
 async function handleIdentify(req, res) {
@@ -354,15 +477,25 @@ async function handleIdentify(req, res) {
   const t0 = Date.now();
   const { cards: detected, cardBack } = await identifyCards(img, mediaType);
   const cards = await mapLimit(detected, 3, async (d) => {
+    let candidates = [];
+    let error;
     try {
-      const candidates = await lookupCard(d);
-      return { detected: d, candidates, status: statusFor(d, candidates) };
+      candidates = await lookupCard(d);
     } catch (e) {
-      return { detected: d, candidates: [], status: 'nomatch', error: e.message };
+      error = e.message;
     }
+    const pulse = await safePulse(pulseQueryFor(candidates[0], d));
+    return { detected: d, candidates, status: error ? 'nomatch' : statusFor(d, candidates), pulse, ...(error ? { error } : {}) };
   });
   console.log(`identify: ${cards.length} card(s)${cardBack ? ' (card back)' : ''} in ${Date.now() - t0}ms`);
   sendJSON(res, 200, { cards, cardBack: cardBack && !cards.length });
+}
+
+async function handlePulse(url, res) {
+  const g = (k) => str(url.searchParams.get(k));
+  if (!g('name') && !g('number')) return sendJSON(res, 400, { error: 'Need a card name or number' });
+  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId: g('setId') });
+  sendJSON(res, 200, { pulse: result, creditsLeft: pulseCreditsLeft() });
 }
 
 async function handlePhoto(req, res) {
@@ -421,6 +554,9 @@ const server = http.createServer(async (req, res) => {
           model: MODEL,
           passwordRequired: !!APP_PASSWORD,
           photoHostSet: !!IMGBB_KEY,
+          pulseSet: !!PULSE_KEY,
+          pulseCreditsLeft: PULSE_KEY ? pulseCreditsLeft() : 0,
+          pulseDailyLimit: PULSE_DAILY_LIMIT,
         });
       }
       if (!authorised(req)) return sendJSON(res, 401, { error: 'Wrong or missing app password' });
@@ -428,6 +564,7 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/identify' && req.method === 'POST') return await handleIdentify(req, res);
       if (url.pathname === '/api/search' && req.method === 'GET') return await handleSearch(url, res);
       if (url.pathname === '/api/photo' && req.method === 'POST') return await handlePhoto(req, res);
+      if (url.pathname === '/api/pulse' && req.method === 'GET') return await handlePulse(url, res);
       return sendJSON(res, 404, { error: 'Not found' });
     }
     return serveStatic(url.pathname, res);
@@ -443,7 +580,8 @@ if (require.main === module) {
     if (!ANTHROPIC_API_KEY) console.warn('Warning: ANTHROPIC_API_KEY is not set');
     if (!APP_PASSWORD) console.warn('Warning: APP_PASSWORD is not set — anyone with the URL can use your API credit');
     if (!IMGBB_KEY) console.warn('Note: IMGBB_API_KEY is not set — your photos will not be added to listings');
+    if (!PULSE_KEY) console.warn('Note: PULSE_API_KEY is not set — Pulse prices are off');
   });
 }
 
-module.exports = { server, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
