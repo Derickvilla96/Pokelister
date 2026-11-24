@@ -55,11 +55,12 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
   "rarity": "your best guess at the rarity",
   "finish": "one of: normal, holo, reverse holo, unknown",
   "first_edition": false,
+  "stamp": "any stamp printed on the card itself, described briefly (e.g. 'Twilight Masquerade' set-logo stamp, 'Prerelease', 'Pokémon Center', 'Staff', 'Worlds 2023'), or empty string if none",
   "language": "English, Japanese, etc.",
   "notes": "anything a seller should know: graded slab, visible damage, promo stamp, card hard to read; empty string if nothing",
   "confidence": 0.9
 }]}
-"first_edition" is true only if a 1st Edition stamp is visible. "confidence" is a number from 0 to 1 for how sure you are of the name AND number.
+"first_edition" is true only if a 1st Edition stamp is visible. Look carefully for stamps: they are small logos or words printed on the artwork or text box (often in gold or foil). Don't count the normal set symbol next to the card number, or the 1st Edition stamp (that's "first_edition"). "confidence" is a number from 0 to 1 for how sure you are of the name AND number.
 If the photo shows only the BACK of a card or cards (the standard blue Poké Ball back) and no card fronts, reply {"cards":[],"card_back":true}.
 If no card is visible at all, reply {"cards":[]}.`;
 
@@ -148,6 +149,7 @@ function cleanDetected(c) {
     rarity: str(c.rarity),
     finish: ['normal', 'holo', 'reverse holo'].includes(finish) ? finish : 'unknown',
     first_edition: c.first_edition === true,
+    stamp: str(c.stamp).replace(/^(none|no|n\/a)$/i, ''),
     language: str(c.language) || 'English',
     notes: str(c.notes),
     confidence: Math.max(0, Math.min(1, confidence)),
@@ -370,7 +372,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
-const PULSE_PRICE_VERSION = 3; // bump to ignore prices cached under an older rule
+const PULSE_PRICE_VERSION = 4; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
@@ -473,19 +475,58 @@ function normSetId(id) {
   return String(id || '').toLowerCase().replace(/^card:/, '').replace(/^me(\d)/, 'm$1');
 }
 
-// Returns { result, how } or null. how = 'set+number' (safe) or 'number' (no set confirmation).
-function pickPulseResult(results, setId, cardNumber, english = true) {
+// The version part of a Pulse product id: "card:sv6pt5|012/064|Holo|..." -> "holo"
+function pulseVariant(r) {
+  const v = String((r && r.product_id) || '').split('|')[2] || '';
+  return v.toLowerCase() === 'null' ? '' : v.trim();
+}
+
+// Several Pulse products can share a set and number (normal holo, stamped, promo...).
+// Prefer the one matching the card's finish, then a plain version, then the cheapest.
+function stampWords(stamp) {
+  return String(stamp || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !['stamp', 'stamped', 'logo'].includes(w));
+}
+
+function rankVersions(list, finish, stamp) {
+  const f = String(finish || '').toLowerCase();
+  const words = stampWords(stamp);
+  const stamped = !!String(stamp || '').trim();
+  const score = (r) => {
+    const v = pulseVariant(r).toLowerCase();
+    const isStampVersion = /stamp|prerelease|staff|promo|pok[eé]mon center|worlds/.test(v);
+    let s = 0;
+    if (stamped) {
+      if (isStampVersion) s += 8;
+      if (words.some((w) => v.includes(w))) s += 4; // e.g. "Twilight Masquerade Stamp"
+    } else {
+      if (isStampVersion) s -= 8;
+      if (['', 'normal', 'holo', 'reverse holo'].includes(v)) s += 2; // plain version
+    }
+    if (f === 'reverse holo' ? /reverse/.test(v) : f === 'holo' ? /(^|\s)holo/.test(v) && !/reverse/.test(v) : !/holo/.test(v)) s += 3;
+    return s;
+  };
+  return [...list].sort((a, b) => score(b) - score(a) || pulsePriceOf(a).gbp - pulsePriceOf(b).gbp);
+}
+
+// Returns { result, how, versions } or null. how = 'set+number' (safe) or 'number' (no set confirmation).
+function pickPulseResult(results, setId, cardNumber, english = true, finish = '', stamp = '') {
   const usable = results.filter((r) => pulsePriceOf(r) && !(english && isForeignPrinting(r)));
   const numberMatches = cardNumber ? usable.filter((r) => sameCardNumber(r.card_number, cardNumber)) : [];
+  let group = null;
+  let how = '';
   if (setId) {
-    const exact = numberMatches.find((r) => normSetId(pulseSetPart(r)) === normSetId(setId));
-    if (exact) return { result: exact, how: 'set+number' };
+    const exact = numberMatches.filter((r) => normSetId(pulseSetPart(r)) === normSetId(setId));
+    if (exact.length) { group = exact; how = 'set+number'; }
   }
-  // No set confirmation: accept only if every number match comes from one single set,
-  // so we never pick between two different printings.
-  const sets = new Set(numberMatches.map(pulseSetPart));
-  if (numberMatches.length && sets.size === 1) return { result: numberMatches[0], how: 'number' };
-  return null;
+  if (!group) {
+    // No set confirmation: accept only if every number match comes from one single set,
+    // so we never pick between two different printings.
+    const sets = new Set(numberMatches.map(pulseSetPart));
+    if (numberMatches.length && sets.size === 1) { group = numberMatches; how = 'number'; }
+  }
+  if (!group) return null;
+  const ranked = rankVersions(group, finish, stamp);
+  return { result: ranked[0], how, versions: ranked };
 }
 
 // "034" + "086" -> ["034/086", "34/86"]; letters (TG05/TG30, SWSH050) are kept as printed
@@ -499,12 +540,12 @@ function cardNumberVariants(number, total) {
   return [...new Set([`${n}/${t}`, `${pad(n)}/${pad(t)}`, `${parseInt(n, 10)}/${parseInt(t, 10)}`])];
 }
 
-async function pulseLookup({ name, number, total, setId, setLabel, language }) {
+async function pulseLookup({ name, number, total, setId, setLabel, language, finish, stamp }) {
   if (!PULSE_KEY) return { status: 'off' };
   const variants = cardNumberVariants(number, total);
   const printed = variants[0] || '';
   const english = !language || /^english$/i.test(language);
-  const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
+  const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}|${String(finish || '').toLowerCase()}|${String(stamp || '').toLowerCase()}`;
   const hit = pulseCache.get(key);
   if (hit && Date.now() - hit.at < (hit.result.status === 'ok' ? PULSE_CACHE_MS : PULSE_NOMATCH_CACHE_MS)) return hit.result;
 
@@ -522,14 +563,19 @@ async function pulseLookup({ name, number, total, setId, setLabel, language }) {
       sample: found.filter((r) => !(english && isForeignPrinting(r))).slice(0, 3).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')),
       foreignSkipped: english ? found.filter(isForeignPrinting).length : 0,
     });
-    const pick = pickPulseResult(found, setId, printed, english);
+    const pick = pickPulseResult(found, setId, printed, english, finish, stamp);
     if (pick) {
       const best = pick.result;
       const price = pulsePriceOf(best);
       result = {
         v: PULSE_PRICE_VERSION, status: 'ok', gbp: price.gbp, basis: price.basis, market: price.market, cmNm: price.cmNm,
         productId: best.product_id || '', cardNumber: best.card_number || '',
-        matchedBy: pick.how,
+        variant: pulseVariant(best), matchedBy: pick.how,
+        // every Pulse version with this set + number, so the app can offer a choice
+        versions: pick.versions.slice(0, 8).map((r) => {
+          const pr = pulsePriceOf(r);
+          return { productId: r.product_id || '', variant: pulseVariant(r), gbp: pr.gbp, basis: pr.basis, market: pr.market, cmNm: pr.cmNm };
+        }),
       };
       break;
     }
@@ -548,11 +594,11 @@ function pulseQueryFor(candidate, detected) {
     // keep the total as printed on the card ("086", not "86") when it's the same number
     const printedTotal = d.set_total && numPart(d.set_total) === numPart(candidate.printedTotal) ? d.set_total : String(candidate.printedTotal || '');
     return { name: candidate.name, number: printedNum, total: printedTotal,
-      setId: candidate.setId, setLabel: candidate.setName, language: detected && detected.language };
+      setId: candidate.setId, setLabel: candidate.setName, language: d.language, finish: d.finish, stamp: d.stamp };
   }
   const d = detected || {};
   return { name: d.name, number: d.number, total: d.set_total,
-    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language };
+    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language, finish: d.finish, stamp: d.stamp };
 }
 
 async function safePulse(query) {
@@ -598,7 +644,7 @@ async function handlePulse(url, res) {
   if (!g('name') && !g('number')) return sendJSON(res, 400, { error: 'Need a card name or number' });
   const setId = g('setId') || guessSetId(g('setCode'), g('setName'));
   const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId,
-    setLabel: g('setName') || g('setCode') || setId, language: g('language') });
+    setLabel: g('setName') || g('setCode') || setId, language: g('language'), finish: g('finish'), stamp: g('stamp') });
   sendJSON(res, 200, { pulse: result, creditsLeft: pulseCreditsLeft() });
 }
 
@@ -689,4 +735,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
