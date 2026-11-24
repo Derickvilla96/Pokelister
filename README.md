@@ -1,6 +1,6 @@
 # PokeLister
 
-Photograph Pokémon cards (front and back) on your iPhone. The app identifies them, fills in the listing details and exports a CSV that eBay turns into draft listings with your photos attached.
+Photograph Pokémon cards (front and back) on your iPhone. The app identifies them, fills in the listing details and item specifics, and exports a CSV that eBay turns into live listings (or drafts), with your photos, condition and policies attached.
 
 How it works:
 
@@ -9,7 +9,7 @@ How it works:
 3. The server matches each card against the free Pokémon TCG API (pokemontcg.io) and picks up the set name, rarity, stock image and Cardmarket trend price.
 4. Front and back photos are uploaded to **ImgBB**, a free image host, so eBay has web links it can pull them from.
 5. You review the cards. Anything marked **Check** (orange border) needs a look.
-6. Tap **Download CSV** (or **Share CSV** to save it to Files), then upload it to eBay Seller Hub. The listings appear as drafts with the front and back photos attached.
+6. Tap **Download CSV** (or **Share CSV** to save it to Files), then upload it to eBay Seller Hub. By default the cards go live straight away.
 
 Zero dependencies, Node 18+, vanilla HTML/JS.
 
@@ -54,13 +54,47 @@ public/app.js        frontend: queue, front/back pairing, review list, CSV expor
 
 **Binder pages:** the whole page photo becomes the front photo for every card on it. Use Add back on individual cards if you want backs for those.
 
+## Item specifics
+
+Each card has an **Item specifics** section. Tap it to open. PokeLister fills in Game, Card Name, Character, Card Type, Set, Card Number, Rarity, Finish, Language, Manufacturer, Year Manufactured, Features (1st Edition) and Graded (No) from the card match.
+
+- Anything it couldn't find is outlined orange and counted as "missing", both on the card and in the summary bar. Just type it in.
+- Your edits stick even if you change the match. **Undo my edits** goes back to the automatic values.
+- **Extra specifics:** add anything else eBay asks for, one per line as `Name: Value`, e.g. `Attribute/MTG:Colour: Colorless` or `Age Level: 6+`.
+- Change the defaults for Game and Manufacturer in Settings.
+
+## Export mode
+
+Settings → **Export as**:
+
+- **Live listings** (default): uploading the CSV lists the cards straight away, with:
+  - condition **Ungraded** plus the card condition you picked (Near Mint, Lightly/Moderately/Heavily Played; Damaged is sent as Heavily Played)
+  - all item specifics
+  - your postage, returns and payment policies, item location and an optional Best Offer
+  - Good 'Til Cancelled, fixed price, and your front and back photos
+- **Drafts:** the same file, but as drafts with item specifics. eBay's drafts upload ignores policies and condition, so you set those on each draft.
+
+### Live listing setup (once)
+
+In PokeLister → ⚙︎ Settings → **Live listings**, fill in:
+
+- **Postage policy name** and **Returns policy name**, exactly as they appear in eBay (Account → Business policies, or check what's selected on a listing).
+- **Payment policy name** (optional; leave blank if you don't have one).
+- **Item postcode** (required by eBay) and optionally your town.
+
+These are stored only on your phone.
+
+Live listings can't be checked on eBay before they go live, so PokeLister is where you review everything. Export asks you to confirm before creating a live-listings file, and blocks the export if any card has no price.
+
 ## Uploading to eBay
 
 1. Seller Hub → **Reports** → **Uploads** → **Upload template**, then pick the CSV.
-2. Go to **Listings → Drafts**. Each draft has the title, price, quantity, category, description and your front and back photos.
-3. Set the condition (Graded/Ungraded plus card condition) and any item specifics, then list.
+2. Wait for the result. **Live mode:** the cards appear under **Listings → Active**. **Drafts mode:** they appear under **Listings → Drafts**.
+3. If anything fails, download eBay's results file. It gives the reason for each row.
 
 When a listing is created, eBay copies the photos onto its own servers, so the ImgBB copies only need to exist until then.
+
+**First time:** test with one cheap card. If eBay complains about a column name (item specific names can differ slightly on eBay UK), download the category template for 183454 from Seller Hub (Reports → Uploads → Download template), check the exact `C:` names, and either tell me or use the Extra specifics box.
 
 ### If eBay rejects the file
 
