@@ -37,7 +37,42 @@
     minPrice: 0.99,
     descTemplate: DEFAULT_DESC,
     pairsMode: true,
+    exportMode: 'live',
+    shippingPolicy: '',
+    returnPolicy: '',
+    paymentPolicy: '',
+    postcode: '',
+    location: '',
+    bestOffer: false,
+    specGame: 'Pokémon TCG',
+    specManufacturer: 'The Pokémon Company',
   };
+
+  // eBay card-condition codes for ungraded cards in CCG Individual Cards (183454)
+  const CD_CONDITION = {
+    'Near Mint': '400010',          // Near Mint or Better
+    'Lightly Played': '400015',     // Lightly Played (Excellent)
+    'Moderately Played': '400016',  // Moderately Played (Very Good)
+    'Heavily Played': '400017',     // Heavily Played (Poor)
+    'Damaged': '400017',
+  };
+
+  // Item specifics sent as C: columns. "need" = counted as missing when blank.
+  const SPECIFICS = [
+    { key: 'Game', need: true },
+    { key: 'Card Name', need: true },
+    { key: 'Character', need: false },
+    { key: 'Card Type', need: true },
+    { key: 'Set', need: true },
+    { key: 'Card Number', need: true },
+    { key: 'Rarity', need: true },
+    { key: 'Finish', need: true },
+    { key: 'Language', need: true },
+    { key: 'Manufacturer', need: true },
+    { key: 'Year Manufactured', need: false },
+    { key: 'Features', need: false },
+    { key: 'Graded', need: true },
+  ];
 
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (v) => String(v == null ? '' : v)
@@ -407,12 +442,77 @@
     if (!r.titleEdited) r.title = buildTitle(r);
   }
 
+  // ---------- item specifics ----------
+
+  // "Team Rocket's Mewtwo ex" -> "Mewtwo", "Radiant Charizard" -> "Charizard"
+  function characterName(name) {
+    let s = String(name || '').trim();
+    s = s.replace(/^.+?'s\s+/, '');
+    s = s.replace(/^(Radiant|Shining|Dark|Light|Alolan|Galarian|Hisuian|Paldean|Mega|M)\s+/i, '');
+    const suffix = /[\s-]+(ex|EX|GX|V|VMAX|VSTAR|V-UNION|BREAK|LV\.X|Prime|LEGEND|Star|δ|☆|TAG TEAM|◇)$/;
+    while (suffix.test(s)) s = s.replace(suffix, '');
+    return s.trim();
+  }
+
+  function autoSpecifics(r) {
+    const i = cardInfo(r);
+    const c = chosen(r);
+    const supertype = (c && c.supertype) || '';
+    const cardType = /pok/i.test(supertype) ? 'Pokémon' : supertype;
+    const finish = r.finish === 'holo' ? 'Holo' : r.finish === 'reverse holo' ? 'Reverse Holo' : 'Non-Holo';
+    const year = c && c.releaseDate ? String(c.releaseDate).slice(0, 4) : '';
+    return {
+      'Game': settings.specGame || 'Pokémon TCG',
+      'Card Name': i.name || '',
+      'Character': cardType === 'Pokémon' || (!supertype && i.name) ? characterName(i.name) : '',
+      'Card Type': cardType,
+      'Set': i.set || '',
+      'Card Number': i.number || '',
+      'Rarity': i.rarity || '',
+      'Finish': finish,
+      'Language': i.language || 'English',
+      'Manufacturer': settings.specManufacturer || '',
+      'Year Manufactured': year,
+      'Features': r.firstEd ? '1st Edition' : '',
+      'Graded': 'No',
+    };
+  }
+
+  // Your edits win; anything you haven't touched follows the card match.
+  function getSpecifics(r) {
+    const auto = autoSpecifics(r);
+    const own = r.specifics || {};
+    const out = {};
+    for (const { key } of SPECIFICS) out[key] = key in own ? own[key] : auto[key];
+    return out;
+  }
+
+  function parseExtraSpecifics(text) {
+    const out = {};
+    for (const line of String(text || '').split(/\r?\n/)) {
+      // split on the last ": " so names like "Attribute/MTG:Colour: Colorless" work;
+      // fall back to the first ":" for lines typed without a space
+      const m = line.match(/^\s*(.+):\s+(.+?)\s*$/) || line.match(/^\s*([^:]+?)\s*:\s*(.+?)\s*$/);
+      if (m && m[1].trim()) out[m[1].trim()] = m[2];
+    }
+    return out;
+  }
+
+  function missingSpecifics(r) {
+    const s = getSpecifics(r);
+    return SPECIFICS.filter((x) => x.need && !String(s[x.key] || '').trim()).map((x) => x.key);
+  }
+
   // ---------- export ----------
 
   function skuFor(r) {
     const i = cardInfo(r);
     const base = (i.id || 'X').replace(/[^A-Za-z0-9-]/g, '');
     return `${settings.skuPrefix || 'PKM'}-${base}-${r.id.slice(-4).toUpperCase()}`;
+  }
+
+  function exportPrefix() {
+    return settings.exportMode === 'drafts' ? 'ebay-drafts' : 'ebay-listings';
   }
 
   function buildDescription(r) {
@@ -444,33 +544,109 @@
     return isFinite(n) && n > 0 ? n.toFixed(2) : '';
   }
 
-  function buildCSV(list) {
+  const ACTION_HEADER = 'Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193|CC=UTF-8)';
+
+  // Item specific column names: the standard ones plus any extras typed on any card.
+  function specificColumns(list) {
+    const names = SPECIFICS.map((x) => x.key);
+    for (const r of list) {
+      for (const k of Object.keys(parseExtraSpecifics(r.extraSpecifics))) {
+        if (!names.some((n) => n.toLowerCase() === k.toLowerCase())) names.push(k);
+      }
+    }
+    return names;
+  }
+
+  function specificValues(r, names) {
+    const s = { ...getSpecifics(r) };
+    const extra = parseExtraSpecifics(r.extraSpecifics);
+    for (const [k, v] of Object.entries(extra)) {
+      const match = names.find((n) => n.toLowerCase() === k.toLowerCase());
+      if (match) s[match] = v;
+    }
+    return names.map((n) => s[n] || '');
+  }
+
+  function infoLine(text, columns) {
+    return text + ','.repeat(Math.max(0, columns - 1));
+  }
+
+  function buildDraftCSV(list) {
+    const specNames = specificColumns(list);
     const header = [
-      'Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193|CC=UTF-8)',
-      'Custom label (SKU)', 'Category ID', 'Title', 'UPC', 'Price', 'Quantity',
+      ACTION_HEADER, 'Custom label (SKU)', 'Category ID', 'Title', 'UPC', 'Price', 'Quantity',
       'Item photo URL', 'Condition ID', 'Description', 'Format',
+      ...specNames.map((n) => 'C:' + n),
     ];
     const lines = [
-      '#INFO,Version=0.0.2,Template= eBay-draft-listings-template_GB,,,,,,,,',
+      infoLine('#INFO,Version=0.0.2,Template= eBay-draft-listings-template_GB', header.length - 1),
       header.map(csvCell).join(','),
     ];
     for (const r of list) {
       lines.push([
         'Draft', skuFor(r), settings.categoryId, r.title, '', priceStr(r.price),
         parseInt(r.qty, 10) || 1, photoUrls(r).join('|'), settings.conditionId, buildDescription(r), 'FixedPrice',
+        ...specificValues(r, specNames),
       ].map(csvCell).join(','));
     }
     return lines.join('\r\n') + '\r\n';
   }
 
+  function buildLiveCSV(list) {
+    const specNames = specificColumns(list);
+    const header = [
+      ACTION_HEADER, 'CustomLabel', 'Category', 'Title', 'ConditionID', 'CD:Card Condition - (ID: 40001)',
+      ...specNames.map((n) => 'C:' + n),
+      'PicURL', 'Description', 'Format', 'Duration', 'StartPrice', 'BestOfferEnabled', 'Quantity',
+      'Location', 'PostalCode', 'ShippingProfileName', 'ReturnProfileName', 'PaymentProfileName',
+    ];
+    const lines = [
+      infoLine('#INFO,Version=1.0.0,Template=fx_category_template_EBAY_GB', header.length - 1),
+      header.map(csvCell).join(','),
+    ];
+    for (const r of list) {
+      lines.push([
+        'Add', skuFor(r), settings.categoryId, r.title, '4000', CD_CONDITION[r.condition] || '400010',
+        ...specificValues(r, specNames),
+        photoUrls(r).join('|'), buildDescription(r), 'FixedPrice', 'GTC', priceStr(r.price),
+        settings.bestOffer ? '1' : '0', parseInt(r.qty, 10) || 1,
+        settings.location || settings.postcode, settings.postcode,
+        settings.shippingPolicy, settings.returnPolicy, settings.paymentPolicy,
+      ].map(csvCell).join(','));
+    }
+    return lines.join('\r\n') + '\r\n';
+  }
+
+  function buildCSV(list) {
+    return settings.exportMode === 'drafts' ? buildDraftCSV(list) : buildLiveCSV(list);
+  }
+
   function exportName() {
     const d = new Date();
     const p = (n) => String(n).padStart(2, '0');
-    return `ebay-drafts-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`;
+    return `${exportPrefix()}-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`;
   }
 
   function readyToExport() {
     if (!rows.length) { toast('No cards to export'); return false; }
+    const live = settings.exportMode !== 'drafts';
+    if (live) {
+      const missingSettings = [];
+      if (!String(settings.shippingPolicy).trim()) missingSettings.push('postage policy name');
+      if (!String(settings.returnPolicy).trim()) missingSettings.push('returns policy name');
+      if (!String(settings.postcode).trim()) missingSettings.push('postcode');
+      if (missingSettings.length) {
+        alert(`For live listings, add your ${missingSettings.join(', ')} in Settings first.`);
+        openSettings();
+        return false;
+      }
+      const noPriceLive = rows.filter((r) => !priceStr(r.price)).length;
+      if (noPriceLive) {
+        alert(`${noPriceLive} card${noPriceLive === 1 ? ' has' : 's have'} no price. Live listings need a price.`);
+        return false;
+      }
+    }
+    const noSpecs = rows.filter((r) => missingSpecifics(r).length).length;
     const busy = jobs.filter((j) => j.status === 'queued' || j.status === 'working').length
       + rows.filter((r) => r._uploading).length;
     const noPrice = rows.filter((r) => !priceStr(r.price)).length;
@@ -483,7 +659,9 @@
     if (toCheck) issues.push(`${toCheck} still marked to check`);
     if (noPhotos) issues.push(`${noPhotos} without an uploaded front photo`);
     if (noBack) issues.push(`${noBack} without a back photo`);
+    if (noSpecs) issues.push(`${noSpecs} with item specifics missing`);
     if (issues.length && !confirm(`${issues.join(', ')}. Export anyway?`)) return false;
+    if (live && !confirm(`Export ${rows.length} LIVE listing${rows.length === 1 ? '' : 's'}? They go live as soon as you upload the file to eBay.`)) return false;
     return true;
   }
 
@@ -555,6 +733,32 @@
     return `<p class="photo-status">Listing photos: ${f} · ${b}${busy}</p>`;
   }
 
+  function specCountHtml(r) {
+    const missing = missingSpecifics(r);
+    return missing.length
+      ? `<span class="spec-count warn">${missing.length} missing</span>`
+      : '<span class="spec-count ok">✓ complete</span>';
+  }
+
+  function specsHtml(r) {
+    const s = getSpecifics(r);
+    const fields = SPECIFICS.map(({ key, need }) => {
+      const v = s[key] || '';
+      const wide = ['Card Name', 'Set', 'Game', 'Rarity', 'Manufacturer'].includes(key);
+      return `<label class="field${need && !v.trim() ? ' missing' : ''}${wide ? ' wide' : ''}"><span>${esc(key)}</span>
+        <input data-spec="${esc(key)}" value="${esc(v)}" placeholder="${need ? 'needed' : 'optional'}"></label>`;
+    }).join('');
+    const edited = r.specifics && Object.keys(r.specifics).length;
+    return `<details class="specs"${r._specOpen ? ' open' : ''}>
+      <summary><span>Item specifics</span>${specCountHtml(r)}</summary>
+      <div class="spec-grid">${fields}
+        <label class="field wide"><span>Extra specifics (one per line, Name: Value)</span>
+          <textarea data-f="extraSpecifics" rows="2" placeholder="Attribute/MTG:Colour: Colorless">${esc(r.extraSpecifics || '')}</textarea></label>
+      </div>
+      ${edited ? '<div class="spec-actions"><button class="btn small" data-a="resetSpecs">Undo my edits</button></div>' : ''}
+    </details>`;
+  }
+
   function rowEl(r) {
     const c = chosen(r);
     const i = cardInfo(r);
@@ -611,6 +815,7 @@
         </div>
         <label class="check"><input type="checkbox" data-f="firstEd"${r.firstEd ? ' checked' : ''}> 1st Edition</label>
         ${notes}
+        ${specsHtml(r)}
         ${photoStatusHtml(r)}
         <div class="row-actions">
           <button class="btn small" data-a="addBack"${busy ? ' disabled' : ''}>${r.backPhoto ? 'Replace back' : 'Add back'}</button>
@@ -659,12 +864,15 @@
     const toCheck = rows.filter((r) => r.status !== 'ok').length;
     const noPrice = rows.filter((r) => !priceStr(r.price)).length;
     const noBack = rows.filter((r) => !r.backPhoto).length;
+    const noSpecs = rows.filter((r) => missingSpecifics(r).length).length;
     const total = rows.reduce((s, r) => s + (parseFloat(priceStr(r.price)) || 0) * (parseInt(r.qty, 10) || 1), 0);
     el.innerHTML = `
       <span><strong>${rows.length}</strong> listing${rows.length === 1 ? '' : 's'} (${qty} cards)</span>
       ${toCheck ? `<span class="warn">${toCheck} to check</span>` : ''}
       ${noPrice ? `<span class="warn">${noPrice} no price</span>` : ''}
       ${noBack ? `<span class="warn">${noBack} no back</span>` : ''}
+      ${noSpecs ? `<span class="warn">${noSpecs} specifics missing</span>` : ''}
+      <span class="muted">${settings.exportMode === 'drafts' ? 'Exporting drafts' : 'Exporting live listings'}</span>
       <span>£${total.toFixed(2)}</span>
       <label class="small"><input type="checkbox" id="onlyCheck"${onlyCheck ? ' checked' : ''}> Only to check</label>`;
   }
@@ -726,10 +934,35 @@
 
     const list = $('#list');
 
+    // remember which item-specifics panels are open (toggle doesn't bubble, so capture it)
+    list.addEventListener('toggle', (e) => {
+      if (!e.target.matches || !e.target.matches('details.specs')) return;
+      const r = rowFor(e.target);
+      if (r) r._specOpen = e.target.open;
+    }, true);
+
     list.addEventListener('input', (e) => {
+      const spec = e.target.dataset.spec;
+      if (spec) {
+        const r = rowFor(e.target);
+        if (!r) return;
+        r.specifics = r.specifics || {};
+        r.specifics[spec] = e.target.value;
+        const need = SPECIFICS.find((x) => x.key === spec);
+        e.target.closest('.field').classList.toggle('missing', !!(need && need.need && !e.target.value.trim()));
+        e.target.closest('details').querySelector('.spec-count').outerHTML = specCountHtml(r);
+        renderSummary();
+        saveRows();
+        return;
+      }
       const f = e.target.dataset.f;
       const r = f && rowFor(e.target);
       if (!r) return;
+      if (f === 'extraSpecifics') {
+        r.extraSpecifics = e.target.value;
+        saveRows();
+        return;
+      }
       if (f === 'title') {
         r.title = e.target.value;
         if (!r.titleEdited) {
@@ -796,6 +1029,10 @@
         searchResults.delete(r.id);
         rowNode.remove();
         renderSummary();
+        saveRows();
+      } else if (a === 'resetSpecs') {
+        r.specifics = {};
+        rerenderRow(r);
         saveRows();
       } else if (a === 'ok') {
         r.status = 'ok';
@@ -883,8 +1120,10 @@
 
   // ---------- settings ----------
 
-  const SETTING_FIELDS = ['password', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
-    'defaultCondition', 'includeStockPhoto', 'autoPrice', 'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate'];
+  const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
+    'defaultCondition', 'includeStockPhoto', 'autoPrice', 'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
+    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer',
+    'specGame', 'specManufacturer'];
 
   function openSettings() {
     $('#s_defaultCondition').innerHTML = CONDITIONS.map((c) => `<option>${esc(c)}</option>`).join('');
@@ -913,11 +1152,17 @@
     settings.minPrice = numOr(settings.minPrice, 0);
     settings.categoryId = String(settings.categoryId).trim() || DEFAULT_SETTINGS.categoryId;
     if (!String(settings.descTemplate).trim()) settings.descTemplate = DEFAULT_DESC;
+    for (const k of ['shippingPolicy', 'returnPolicy', 'paymentPolicy', 'location', 'specGame', 'specManufacturer']) {
+      settings[k] = String(settings[k] || '').trim();
+    }
+    settings.postcode = String(settings.postcode || '').trim().toUpperCase();
+    if (!settings.specGame) settings.specGame = DEFAULT_SETTINGS.specGame;
   }
 
   async function saveSettings() {
     readSettingsForm();
     store(LS_SETTINGS, settings);
+    renderList(); // export mode / defaults may change what each card shows
     try {
       await api('/api/auth');
       toast('Saved');

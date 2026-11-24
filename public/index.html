@@ -62,12 +62,36 @@
       <input id="s_password" type="password" autocomplete="current-password"></label>
 
     <h3>eBay export</h3>
+    <label class="field"><span>Export as</span>
+      <select id="s_exportMode">
+        <option value="live">Live listings (go live as soon as you upload)</option>
+        <option value="drafts">Drafts (finish them in Seller Hub)</option>
+      </select></label>
     <label class="field"><span>Category ID</span>
       <input id="s_categoryId" inputmode="numeric"></label>
     <p class="help">183454 = CCG Individual Cards.</p>
+
+    <h3>Live listings</h3>
+    <p class="help">Type the policy names exactly as they appear in eBay (Account → Business policies).</p>
+    <label class="field"><span>Postage policy name</span><input id="s_shippingPolicy" autocomplete="off"></label>
+    <label class="field"><span>Returns policy name</span><input id="s_returnPolicy" autocomplete="off"></label>
+    <label class="field"><span>Payment policy name (optional)</span><input id="s_paymentPolicy" autocomplete="off"></label>
+    <div class="field-row">
+      <label class="field"><span>Item postcode</span><input id="s_postcode" autocomplete="postal-code"></label>
+      <label class="field"><span>Town (optional)</span><input id="s_location"></label>
+    </div>
+    <label class="check"><input id="s_bestOffer" type="checkbox"> Allow Best Offers</label>
+
+    <h3>Drafts only</h3>
     <label class="field"><span>Condition ID column</span>
       <input id="s_conditionId" placeholder="leave blank"></label>
-    <p class="help">Blank is easiest. Set Graded/Ungraded and card condition on the drafts in Seller Hub.</p>
+    <p class="help">Live listings set Ungraded + card condition automatically. For drafts, blank is easiest.</p>
+
+    <h3>Item specifics defaults</h3>
+    <div class="field-row">
+      <label class="field"><span>Game</span><input id="s_specGame"></label>
+      <label class="field"><span>Manufacturer</span><input id="s_specManufacturer"></label>
+    </div>
     <label class="field"><span>SKU prefix</span>
       <input id="s_skuPrefix"></label>
     <div class="field-row">
