@@ -392,8 +392,10 @@ const SET_CODES = {
   SSH: 'swsh1', RCL: 'swsh2', DAA: 'swsh3', CPA: 'swsh35', VIV: 'swsh4', SHF: 'swsh45',
   BST: 'swsh5', CRE: 'swsh6', EVS: 'swsh7', CEL: 'cel25', FST: 'swsh8', BRS: 'swsh9',
   ASR: 'swsh10', PGO: 'pgo', LOR: 'swsh11', SIT: 'swsh12', CRZ: 'swsh12pt5',
+  MEG: 'me1', ME1: 'me1', PFL: 'me2', ME2: 'me2',
 };
 const SET_NAMES = [
+  ['phantasmal flames', 'me2'], ['mega evolution', 'me1'],
   ['paldea evolved', 'sv2'], ['obsidian flames', 'sv3'], ['151', 'sv3pt5'], ['paradox rift', 'sv4'],
   ['paldean fates', 'sv4pt5'], ['temporal forces', 'sv5'], ['twilight masquerade', 'sv6'],
   ['shrouded fable', 'sv6pt5'], ['stellar crown', 'sv7'], ['surging sparks', 'sv8'],
@@ -465,12 +467,18 @@ function isForeignPrinting(r) {
   return /_(jp|kr|cn|tw|th|id|ja|ko|zh)$/.test(pulseSetPart(r)) || /[_-](jp|kr|cn|tw)[_-]/.test(pulseSetPart(r));
 }
 
+// The card database and Pulse spell some set ids differently, e.g. Mega Evolution is
+// "me1" in the database but "m1" in Pulse. Compare them in one shared form.
+function normSetId(id) {
+  return String(id || '').toLowerCase().replace(/^card:/, '').replace(/^me(\d)/, 'm$1');
+}
+
 // Returns { result, how } or null. how = 'set+number' (safe) or 'number' (no set confirmation).
 function pickPulseResult(results, setId, cardNumber, english = true) {
   const usable = results.filter((r) => pulsePriceOf(r) && !(english && isForeignPrinting(r)));
   const numberMatches = cardNumber ? usable.filter((r) => sameCardNumber(r.card_number, cardNumber)) : [];
   if (setId) {
-    const exact = numberMatches.find((r) => pulseSetPart(r) === String(setId).toLowerCase());
+    const exact = numberMatches.find((r) => normSetId(pulseSetPart(r)) === normSetId(setId));
     if (exact) return { result: exact, how: 'set+number' };
   }
   // No set confirmation: accept only if every number match comes from one single set,
@@ -681,4 +689,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
