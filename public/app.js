@@ -374,6 +374,7 @@
       priceAuto: true,
       pulse: result.pulse || null,
       pulseManual: '',
+      dbError: result.error || '',
       title: '',
       titleEdited: false,
       createdAt: Date.now(),
@@ -481,7 +482,15 @@
       const using = p.basis && p.basis.startsWith('Cardmarket') ? ' (using Cardmarket NM, no market price)' : '';
       return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.`, bad: false, recheck: true };
     }
-    if (p.status === 'nomatch') return { text: 'Pulse couldn\'t match this card. Type its Pulse price from the PulseTCG app.', bad: true, fetch: true };
+    if (p.status === 'nomatch') {
+      let why = '';
+      if (p.tried && p.tried.length) {
+        const looked = p.tried.map((t) => `"${t.search}" (${t.results} result${t.results === 1 ? '' : 's'}${t.sample && t.sample.length ? ': ' + t.sample.join(', ') : ''})`).join('; ');
+        const wanted = [p.wanted && p.wanted.number, p.wanted && p.wanted.set].filter(Boolean).join(', ');
+        why = ` Searched ${looked}${wanted ? `; needed ${wanted}` : ''}.`;
+      }
+      return { text: `Pulse couldn't confirm this card, so it didn't guess a price.${why} Type its price from the PulseTCG app, or fix the match and tap Check Pulse.`, bad: true, fetch: true };
+    }
     if (p.status === 'limit') return { text: p.error || 'Daily Pulse limit reached. Type the price in.', bad: true };
     return { text: 'Pulse lookup failed' + (p.error ? `: ${p.error}` : '') + '.', bad: true, fetch: true };
   }
@@ -493,7 +502,8 @@
     const q = c
       ? { name: c.name, number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
           total: String(c.printedTotal || ''), setId: c.setId || '' }
-      : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '' };
+      : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '',
+          setCode: d.set_code || '', setName: d.set_name || '' };
     r.pulse = { status: 'pending' };
     rerenderRow(r);
     try {
@@ -872,7 +882,13 @@
         ? `<div class="price-hint">${ruleText(r)} <button class="btn small" data-a="usePrice">Use</button></div>`
         : (c ? '<div class="price-hint">No Cardmarket price for this card</div>' : '');
     }
-    const notes = r.detected && r.detected.notes ? `<p class="notes">AI note: ${esc(r.detected.notes)}</p>` : '';
+    let notes = r.detected && r.detected.notes ? `<p class="notes">AI note: ${esc(r.detected.notes)}</p>` : '';
+    if (r.chosen === -1) {
+      const why = r.dbError
+        ? `The card database didn't answer (${esc(r.dbError)}).`
+        : 'The card database found nothing for what the AI read.';
+      notes += `<p class="notes">${why} Tap <strong>Retry match</strong>, or <strong>Search</strong> to pick the card yourself.</p>`;
+    }
     const results = searchResults.get(r.id) || [];
     const busy = !!r._uploading;
 
@@ -914,6 +930,7 @@
         <div class="row-actions">
           <button class="btn small" data-a="addBack"${busy ? ' disabled' : ''}>${r.backPhoto ? 'Replace back' : 'Add back'}</button>
           <button class="btn small" data-a="replaceFront"${busy ? ' disabled' : ''}>Replace front</button>
+          ${r.chosen === -1 ? `<button class="btn small" data-a="retryMatch"${r._matching ? ' disabled' : ''}>${r._matching ? 'Retrying…' : 'Retry match'}</button>` : ''}
           <button class="btn small" data-a="search">Search</button>
           ${r.titleEdited ? '<button class="btn small" data-a="retitle">Reset title</button>' : ''}
           ${r.status !== 'ok' ? '<button class="btn small" data-a="ok">Mark OK</button>' : ''}
@@ -1206,6 +1223,26 @@
         fetchPulse(r);
       } else if (a === 'getPulse') {
         fetchPulse(r);
+      } else if (a === 'retryMatch') {
+        r._matching = true;
+        rerenderRow(r);
+        try {
+          const m = await api('/api/match', { method: 'POST', body: JSON.stringify({ detected: r.detected }) });
+          r.candidates = m.candidates || [];
+          r.chosen = r.candidates.length ? 0 : -1;
+          r.status = m.status || (r.chosen >= 0 ? 'check' : 'nomatch');
+          r.dbError = m.error || '';
+          r.pulse = m.pulse || null;
+          r.pulseManual = '';
+          refreshDerived(r);
+          toast(r.chosen >= 0 ? 'Card matched' : (r.dbError ? 'Card database still not answering, try again shortly' : 'Still no match, try Search'));
+        } catch (err) {
+          toast(err.message);
+        } finally {
+          r._matching = false;
+          rerenderRow(r);
+          saveRows();
+        }
       }
     });
 
