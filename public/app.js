@@ -395,6 +395,7 @@
       status: result.status || 'check',
       finish: d.finish,
       firstEd: !!d.first_edition,
+      stamp: d.stamp || '',
       condition: settings.defaultCondition,
       qty: settings.defaultQty || 1,
       price: '',
@@ -443,6 +444,7 @@
     const extras = [];
     if (i.set) extras.push(i.set);
     if (r.firstEd) extras.push('1st Edition');
+    if (String(r.stamp || '').trim()) extras.push('Stamped');
     const fl = finishLabel(r.finish);
     if (fl && !(r.finish === 'holo' && /holo/i.test(rarity))) extras.push(fl);
     if (i.language && !/^english$/i.test(i.language)) extras.push(i.language);
@@ -510,7 +512,8 @@
       const loose = p.matchedBy === 'number'
         ? ` Matched by card number only (Pulse ${p.productId ? 'listed it as ' + p.productId.split('|').slice(0, 2).join(' ') : 'had no set confirmation'}), so double-check this price.`
         : '';
-      return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.${loose}`, bad: !!loose, recheck: true };
+      const ver = p.productId ? ` Version: ${versionLabel(p)}${p.userPicked ? ' (your choice)' : ''}.` : '';
+      return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.${ver}${loose}`, bad: !!loose, recheck: true };
     }
     if (p.status === 'nomatch') {
       let why = '';
@@ -527,6 +530,40 @@
     return { text: 'Pulse lookup failed' + (p.error ? `: ${p.error}` : '') + '.', bad: true, fetch: true };
   }
 
+  // Same preference order as the server: matching finish, then plain version, then cheapest.
+  function rankPulseVersions(versions, finish, stamp) {
+    const f = String(finish || '').toLowerCase();
+    const stamped = !!String(stamp || '').trim();
+    const words = String(stamp || '').toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 3 && !['stamp', 'stamped', 'logo'].includes(w));
+    const score = (x) => {
+      const v = String(x.variant || '').toLowerCase();
+      const isStampVersion = /stamp|prerelease|staff|promo|pok[eé]mon center|worlds/.test(v);
+      let sc = 0;
+      if (stamped) {
+        if (isStampVersion) sc += 8;
+        if (words.some((w) => v.includes(w))) sc += 4;
+      } else {
+        if (isStampVersion) sc -= 8;
+        if (['', 'normal', 'holo', 'reverse holo'].includes(v)) sc += 2;
+      }
+      if (f === 'reverse holo' ? /reverse/.test(v) : f === 'holo' ? /(^|\s)holo/.test(v) && !/reverse/.test(v) : !/holo/.test(v)) sc += 3;
+      return sc;
+    };
+    return [...versions].sort((a, b) => score(b) - score(a) || a.gbp - b.gbp);
+  }
+
+  function usePulseVersion(r, ver, userPicked) {
+    if (!r.pulse || !ver) return;
+    Object.assign(r.pulse, {
+      gbp: ver.gbp, basis: ver.basis, market: ver.market, cmNm: ver.cmNm,
+      productId: ver.productId, variant: ver.variant, userPicked: !!userPicked,
+    });
+  }
+
+  function versionLabel(v) {
+    return v.variant || 'Normal';
+  }
+
   async function fetchPulse(r) {
     if (!usePulse() || !pulseOn) return;
     const c = chosen(r);
@@ -534,9 +571,9 @@
     const q = c
       ? { name: c.name, number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
           total: d.set_total && normNumber(d.set_total) === normNumber(c.printedTotal) ? d.set_total : String(c.printedTotal || ''),
-          setId: c.setId || '', setName: c.setName || '', language: d.language || '' }
+          setId: c.setId || '', setName: c.setName || '', language: d.language || '', finish: r.finish || '', stamp: r.stamp || '' }
       : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '',
-          setCode: d.set_code || '', setName: d.set_name || '', language: d.language || '' };
+          setCode: d.set_code || '', setName: d.set_name || '', language: d.language || '', finish: r.finish || '', stamp: r.stamp || '' };
     r.pulse = { status: 'pending' };
     rerenderRow(r);
     try {
@@ -594,7 +631,7 @@
       'Language': i.language || 'English',
       'Manufacturer': settings.specManufacturer || '',
       'Year Manufactured': year,
-      'Features': r.firstEd ? '1st Edition' : '',
+      'Features': [r.firstEd ? '1st Edition' : '', String(r.stamp || '').trim() ? `Stamped (${String(r.stamp).trim()})` : ''].filter(Boolean).join(', '),
       'Graded': 'No',
     };
   }
@@ -642,6 +679,7 @@
       name: i.name, number: i.number, set: i.set, rarity: i.rarity || '',
       finish: finishLabel(r.finish) || 'Normal', condition: r.condition, language: i.language,
       edition: r.firstEd ? '1st Edition' : 'Unlimited',
+      stamp: String(r.stamp || '').trim() ? `Stamped: ${String(r.stamp).trim()}` : '',
     };
     return String(settings.descTemplate || '')
       .replace(/\{(\w+)\}/g, (m, k) => (k in map ? esc(map[k]) : m))
@@ -908,6 +946,10 @@
             ${showUse ? '<button class="btn small" data-a="usePrice">Apply rule</button>' : ''}
             ${(st.fetch || st.recheck) && pulseOn ? `<button class="btn small" data-a="getPulse">${st.recheck ? 'Recheck' : 'Check Pulse'}</button>` : ''}
           </div>
+          ${r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 ? `
+          <label class="field"><span>Pulse version (${r.pulse.versions.length} found)</span>
+            <select data-f="pulseVersion">${r.pulse.versions.map((v, i) => `<option value="${i}"${v.productId === r.pulse.productId ? ' selected' : ''}>${esc(versionLabel(v))} – £${Number(v.gbp).toFixed(2)}</option>`).join('')}</select>
+          </label>` : ''}
           <div class="pulse-status${st.bad ? ' bad' : ''}">${esc(st.text)}</div>
         </div>`;
     } else {
@@ -957,6 +999,8 @@
           <label class="field"><span>Finish</span><select data-f="finish">${finishOpts}</select></label>
         </div>
         <label class="check"><input type="checkbox" data-f="firstEd"${r.firstEd ? ' checked' : ''}> 1st Edition</label>
+        <label class="field"><span>Stamp ${String(r.stamp || '').trim() ? '<em class="stamp-flag">⭐ stamped</em>' : '(leave blank if none)'}</span>
+          <input data-f="stamp" value="${esc(r.stamp || '')}" placeholder="e.g. Twilight Masquerade, Prerelease, Pokémon Center"></label>
         ${notes}
         ${specsHtml(r)}
         ${photoStatusHtml(r)}
@@ -1160,8 +1204,24 @@
         fetchPulse(r);
       } else if (f === 'condition') {
         r.condition = e.target.value;
+      } else if (f === 'stamp') {
+        r.stamp = e.target.value.trim();
+        if (r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 && !r.pulse.userPicked) {
+          usePulseVersion(r, rankPulseVersions(r.pulse.versions, r.finish, r.stamp)[0], false);
+        }
+        refreshDerived(r);
+        rerenderRow(r);
+      } else if (f === 'pulseVersion') {
+        const ver = r.pulse && r.pulse.versions && r.pulse.versions[parseInt(e.target.value, 10)];
+        usePulseVersion(r, ver, true);
+        refreshDerived(r);
+        rerenderRow(r);
       } else if (f === 'finish') {
         r.finish = e.target.value;
+        // re-pick the Pulse version for the new finish, unless you chose one yourself
+        if (r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 && !r.pulse.userPicked) {
+          usePulseVersion(r, rankPulseVersions(r.pulse.versions, r.finish, r.stamp)[0], false);
+        }
         refreshDerived(r);
         rerenderRow(r);
       } else if (f === 'firstEd') {
@@ -1422,7 +1482,7 @@
   renderList();
   renderNextHint();
   // Cards priced before the switch to Pulse's market price get re-checked once.
-  const PULSE_PRICE_VERSION = 3;
+  const PULSE_PRICE_VERSION = 4;
   async function upgradeOldPulsePrices() {
     if (!usePulse() || !pulseOn) return;
     const old = rows.filter((r) => r.pulse && r.pulse.status === 'ok' && r.pulse.v !== PULSE_PRICE_VERSION);

@@ -246,3 +246,5 @@ body.sheet-open { overflow: hidden; }
   .row-imgs img, .row-imgs .empty-img { width: 130px; }
   .photo-pair figure img, .photo-pair .missing { height: 90px; }
 }
+
+.stamp-flag { font-style: normal; color: var(--accent); }
