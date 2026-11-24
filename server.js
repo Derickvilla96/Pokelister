@@ -258,12 +258,26 @@ function luceneQuote(s) {
   return '"' + String(s).replace(/["\\]/g, '\\$&') + '"';
 }
 
-async function ptcgSearch(q, pageSize = 15) {
+async function ptcgSearchOnce(q, pageSize) {
   const url = `${PTCG_URL}?q=${encodeURIComponent(q)}&pageSize=${pageSize}&orderBy=-set.releaseDate`;
   const headers = PTCG_KEY ? { 'X-Api-Key': PTCG_KEY } : {};
-  const { ok, status, data } = await fetchJSON(url, { headers }, 30000);
-  if (!ok) throw new Error(`Card database error (HTTP ${status})`);
+  const { ok, status, data } = await fetchJSON(url, { headers }, 20000);
+  if (!ok) throw new Error(`card database error (HTTP ${status})`);
   return Array.isArray(data.data) ? data.data : [];
+}
+
+// The free card database is sometimes slow or briefly down, so try twice before giving up.
+async function ptcgSearch(q, pageSize = 15) {
+  try {
+    return await ptcgSearchOnce(q, pageSize);
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      return await ptcgSearchOnce(q, pageSize);
+    } catch (e2) {
+      throw new Error(e2.message === 'Request timed out' ? 'card database didn\'t respond' : e2.message);
+    }
+  }
 }
 
 function toCandidate(card) {
@@ -358,6 +372,7 @@ function statusFor(d, candidates) {
 const pulseCache = new Map(); // key -> { at, result }
 const PULSE_PRICE_VERSION = 2; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
+const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
 
 function todayKey() {
@@ -367,6 +382,36 @@ function todayKey() {
 function pulseCreditsLeft() {
   if (pulseUsage.day !== todayKey()) { pulseUsage.day = todayKey(); pulseUsage.count = 0; }
   return Math.max(0, PULSE_DAILY_LIMIT - pulseUsage.count);
+}
+
+// When the card database fails we only have what the AI read, so map the set code printed
+// on the card (or the set name) to the set id Pulse uses in its product ids.
+const SET_CODES = {
+  SVI: 'sv1', PAL: 'sv2', OBF: 'sv3', MEW: 'sv3pt5', PAR: 'sv4', PAF: 'sv4pt5', TEF: 'sv5',
+  TWM: 'sv6', SFA: 'sv6pt5', SCR: 'sv7', SSP: 'sv8', PRE: 'sv8pt5', JTG: 'sv9', DRI: 'sv10',
+  SSH: 'swsh1', RCL: 'swsh2', DAA: 'swsh3', CPA: 'swsh35', VIV: 'swsh4', SHF: 'swsh45',
+  BST: 'swsh5', CRE: 'swsh6', EVS: 'swsh7', CEL: 'cel25', FST: 'swsh8', BRS: 'swsh9',
+  ASR: 'swsh10', PGO: 'pgo', LOR: 'swsh11', SIT: 'swsh12', CRZ: 'swsh12pt5',
+};
+const SET_NAMES = [
+  ['paldea evolved', 'sv2'], ['obsidian flames', 'sv3'], ['151', 'sv3pt5'], ['paradox rift', 'sv4'],
+  ['paldean fates', 'sv4pt5'], ['temporal forces', 'sv5'], ['twilight masquerade', 'sv6'],
+  ['shrouded fable', 'sv6pt5'], ['stellar crown', 'sv7'], ['surging sparks', 'sv8'],
+  ['prismatic evolutions', 'sv8pt5'], ['journey together', 'sv9'], ['destined rivals', 'sv10'],
+  ['scarlet & violet', 'sv1'], ['scarlet and violet', 'sv1'],
+  ['rebel clash', 'swsh2'], ['darkness ablaze', 'swsh3'], ["champion's path", 'swsh35'],
+  ['vivid voltage', 'swsh4'], ['shining fates', 'swsh45'], ['battle styles', 'swsh5'],
+  ['chilling reign', 'swsh6'], ['evolving skies', 'swsh7'], ['celebrations', 'cel25'],
+  ['fusion strike', 'swsh8'], ['brilliant stars', 'swsh9'], ['astral radiance', 'swsh10'],
+  ['pokémon go', 'pgo'], ['pokemon go', 'pgo'], ['lost origin', 'swsh11'],
+  ['silver tempest', 'swsh12'], ['crown zenith', 'swsh12pt5'], ['sword & shield', 'swsh1'],
+];
+function guessSetId(code, name) {
+  const c = String(code || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (SET_CODES[c]) return SET_CODES[c];
+  const n = String(name || '').toLowerCase();
+  const hit = n && SET_NAMES.find(([k]) => n.includes(k));
+  return hit ? hit[1] : '';
 }
 
 // Same suffix stripping PokeSnipe uses, so names match Pulse's format.
@@ -430,12 +475,12 @@ function pickPulseResult(results, setId, cardNumber) {
   return numberMatches.length && sets.size === 1 ? numberMatches[0] : null;
 }
 
-async function pulseLookup({ name, number, total, setId }) {
+async function pulseLookup({ name, number, total, setId, setLabel }) {
   if (!PULSE_KEY) return { status: 'off' };
   const printed = number ? (total && !/[A-Z]/i.test(number) ? `${number}/${total}` : number) : '';
   const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
   const hit = pulseCache.get(key);
-  if (hit && Date.now() - hit.at < PULSE_CACHE_MS) return hit.result;
+  if (hit && Date.now() - hit.at < (hit.result.status === 'ok' ? PULSE_CACHE_MS : PULSE_NOMATCH_CACHE_MS)) return hit.result;
 
   const q = pulseName(name);
   const tries = [];
@@ -443,9 +488,15 @@ async function pulseLookup({ name, number, total, setId }) {
   if (q && printed && /^0\d/.test(number)) tries.push({ q, card_number: `${numPart(number)}/${total}` }); // 025/198 -> 25/198
   if (q) tries.push({ q });
 
-  let result = { status: 'nomatch' };
+  let result = null;
+  const tried = [];
   for (const params of tries) {
     const found = await pulseSearch(params);
+    tried.push({
+      search: [params.q, params.card_number].filter(Boolean).join(' '),
+      results: found.length,
+      sample: found.slice(0, 3).map((r) => String(r.product_id || r.card_number || '?')),
+    });
     const best = pickPulseResult(found, setId, printed);
     if (best) {
       const price = pulsePriceOf(best);
@@ -456,6 +507,8 @@ async function pulseLookup({ name, number, total, setId }) {
       break;
     }
   }
+  // explain a miss so a screenshot shows what happened
+  if (!result) result = { status: 'nomatch', tried, wanted: { number: printed, set: setLabel || setId || '' } };
   pulseCache.set(key, { at: Date.now(), result });
   return result;
 }
@@ -465,9 +518,12 @@ function pulseQueryFor(candidate, detected) {
   if (candidate) {
     const printedNum = detected && detected.number && numPart(detected.number) === numPart(candidate.number)
       ? detected.number : candidate.number;
-    return { name: candidate.name, number: printedNum, total: String(candidate.printedTotal || ''), setId: candidate.setId };
+    return { name: candidate.name, number: printedNum, total: String(candidate.printedTotal || ''),
+      setId: candidate.setId, setLabel: candidate.setName };
   }
-  return { name: detected.name, number: detected.number, total: detected.set_total, setId: '' };
+  const d = detected || {};
+  return { name: d.name, number: d.number, total: d.set_total,
+    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code };
 }
 
 async function safePulse(query) {
@@ -480,21 +536,30 @@ async function safePulse(query) {
 
 // ---------- routes ----------
 
+// Card database match + Pulse price for one card the AI read.
+async function matchOne(d) {
+  let candidates = [];
+  let error;
+  try {
+    candidates = await lookupCard(d);
+  } catch (e) {
+    error = e.message;
+  }
+  const pulse = await safePulse(pulseQueryFor(candidates[0], d));
+  return { detected: d, candidates, status: error || !candidates.length ? 'nomatch' : statusFor(d, candidates), pulse, ...(error ? { error } : {}) };
+}
+
+async function handleMatch(req, res) {
+  const body = await readJSONBody(req);
+  if (!body || typeof body.detected !== 'object') return sendJSON(res, 400, { error: 'Missing card details' });
+  sendJSON(res, 200, await matchOne(cleanDetected(body.detected)));
+}
+
 async function handleIdentify(req, res) {
   const { img, mediaType } = parseImageBody(await readJSONBody(req));
   const t0 = Date.now();
   const { cards: detected, cardBack } = await identifyCards(img, mediaType);
-  const cards = await mapLimit(detected, 3, async (d) => {
-    let candidates = [];
-    let error;
-    try {
-      candidates = await lookupCard(d);
-    } catch (e) {
-      error = e.message;
-    }
-    const pulse = await safePulse(pulseQueryFor(candidates[0], d));
-    return { detected: d, candidates, status: error ? 'nomatch' : statusFor(d, candidates), pulse, ...(error ? { error } : {}) };
-  });
+  const cards = await mapLimit(detected, 3, matchOne);
   console.log(`identify: ${cards.length} card(s)${cardBack ? ' (card back)' : ''} in ${Date.now() - t0}ms`);
   sendJSON(res, 200, { cards, cardBack: cardBack && !cards.length });
 }
@@ -502,7 +567,8 @@ async function handleIdentify(req, res) {
 async function handlePulse(url, res) {
   const g = (k) => str(url.searchParams.get(k));
   if (!g('name') && !g('number')) return sendJSON(res, 400, { error: 'Need a card name or number' });
-  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId: g('setId') });
+  const setId = g('setId') || guessSetId(g('setCode'), g('setName'));
+  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId, setLabel: g('setName') || g('setCode') || setId });
   sendJSON(res, 200, { pulse: result, creditsLeft: pulseCreditsLeft() });
 }
 
@@ -573,6 +639,7 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/search' && req.method === 'GET') return await handleSearch(url, res);
       if (url.pathname === '/api/photo' && req.method === 'POST') return await handlePhoto(req, res);
       if (url.pathname === '/api/pulse' && req.method === 'GET') return await handlePulse(url, res);
+      if (url.pathname === '/api/match' && req.method === 'POST') return await handleMatch(req, res);
       return sendJSON(res, 404, { error: 'Not found' });
     }
     return serveStatic(url.pathname, res);
@@ -592,4 +659,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
