@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PokeLister">
+<meta name="theme-color" content="#111318">
+<title>PokeLister</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1>PokeLister</h1>
+  <button id="settingsBtn" class="icon-btn" aria-label="Settings">⚙︎</button>
+</header>
+
+<main>
+  <section class="scan">
+    <div class="scan-buttons">
+      <button id="cameraBtn" class="btn primary big">📷 Take photo</button>
+      <button id="libraryBtn" class="btn big">🖼️ Library</button>
+    </div>
+    <input id="cameraInput" class="file-input" type="file" accept="image/*" capture="environment">
+    <input id="libraryInput" class="file-input" type="file" accept="image/*" multiple>
+    <input id="rowPhotoInput" class="file-input" type="file" accept="image/*">
+    <label class="check pairs-toggle"><input type="checkbox" id="pairsMode"> Front &amp; back mode</label>
+    <div id="nextHint" class="next-hint"></div>
+    <p class="hint">Flat, no glare, card filling the frame works best. Binder pages work too (up to 9 cards per photo).</p>
+    <p id="photoHostWarn" class="hint warn-text" hidden>Photo hosting isn't set up (IMGBB_API_KEY on Render), so your photos won't be added to the listings.</p>
+  </section>
+
+  <section id="jobs" class="jobs" hidden></section>
+
+  <section id="summary" class="summary" hidden></section>
+
+  <section id="list" class="list"></section>
+
+  <section id="empty" class="empty">
+    <p>No cards yet. Scan some to get started.</p>
+  </section>
+</main>
+
+<footer class="bottombar">
+  <button id="clearBtn" class="btn ghost">Clear all</button>
+  <button id="shareBtn" class="btn">Share CSV</button>
+  <button id="exportBtn" class="btn primary">Download CSV</button>
+</footer>
+
+<div id="settings" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button id="closeSettings" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+    <p id="serverStatus" class="muted small">Checking server…</p>
+
+    <label class="field"><span>App password</span>
+      <input id="s_password" type="password" autocomplete="current-password"></label>
+
+    <h3>eBay export</h3>
+    <label class="field"><span>Category ID</span>
+      <input id="s_categoryId" inputmode="numeric"></label>
+    <p class="help">183454 = CCG Individual Cards.</p>
+    <label class="field"><span>Condition ID column</span>
+      <input id="s_conditionId" placeholder="leave blank"></label>
+    <p class="help">Blank is easiest. Set Graded/Ungraded and card condition on the drafts in Seller Hub.</p>
+    <label class="field"><span>SKU prefix</span>
+      <input id="s_skuPrefix"></label>
+    <div class="field-row">
+      <label class="field"><span>Default qty</span><input id="s_defaultQty" inputmode="numeric"></label>
+      <label class="field"><span>Default condition</span><select id="s_defaultCondition"></select></label>
+    </div>
+    <label class="check"><input id="s_includeStockPhoto" type="checkbox"> Add stock card image URL to drafts</label>
+    <p class="help">eBay wants photos of the actual item for used cards, so add your own photos on the drafts as well.</p>
+
+    <h3>Pricing</h3>
+    <label class="check"><input id="s_autoPrice" type="checkbox"> Auto-fill price from Cardmarket trend</label>
+    <div class="field-row">
+      <label class="field"><span>€ → £ rate</span><input id="s_eurToGbp" inputmode="decimal"></label>
+      <label class="field"><span>Multiplier</span><input id="s_priceMultiplier" inputmode="decimal"></label>
+      <label class="field"><span>Min £</span><input id="s_minPrice" inputmode="decimal"></label>
+    </div>
+
+    <h3>Description template</h3>
+    <textarea id="s_descTemplate" rows="8"></textarea>
+    <p class="help">Placeholders: {name} {number} {set} {rarity} {finish} {condition} {language} {edition}</p>
+
+    <div class="sheet-actions">
+      <button id="repriceBtn" class="btn">Re-apply auto prices</button>
+      <button id="saveSettings" class="btn primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
