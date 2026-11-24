@@ -39,6 +39,7 @@
     minPrice: 0.99,
     descTemplate: DEFAULT_DESC,
     pairsMode: true,
+    photoBoost: 8,
     exportMode: 'live',
     shippingPolicy: '',
     returnPolicy: '',
@@ -165,13 +166,39 @@
     });
   }
 
+  // Makes up for the brightness lost when an iPhone HDR photo becomes a standard JPEG:
+  // lifts the white point (grey background -> white) and gently brightens the midtones,
+  // keeping blacks black. strength 0.08 = 8%.
+  function brightenLUT(strength) {
+    const k = Math.max(0, Math.min(0.3, strength));
+    const lut = new Uint8ClampedArray(256);
+    for (let v = 0; v < 256; v++) {
+      const x = Math.min(1, (v / 255) / (1 - k));      // white point
+      lut[v] = Math.round(255 * Math.pow(x, 1 / (1 + k / 2))); // midtone lift
+    }
+    return lut;
+  }
+
   function drawScaled(img, maxEdge, quality) {
     const w0 = img.naturalWidth, h0 = img.naturalHeight;
     const s = Math.min(1, maxEdge / Math.max(w0, h0));
     const w = Math.round(w0 * s), h = Math.round(h0 * s);
     const c = document.createElement('canvas');
     c.width = w; c.height = h;
-    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const boost = Number(settings.photoBoost || 0) / 100;
+    if (boost > 0) {
+      const lut = brightenLUT(boost);
+      const data = ctx.getImageData(0, 0, w, h);
+      const px = data.data;
+      for (let i = 0; i < px.length; i += 4) {
+        px[i] = lut[px[i]];
+        px[i + 1] = lut[px[i + 1]];
+        px[i + 2] = lut[px[i + 2]];
+      }
+      ctx.putImageData(data, 0, 0);
+    }
     return c.toDataURL('image/jpeg', quality);
   }
 
@@ -1297,7 +1324,7 @@
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
     'defaultCondition', 'includeStockPhoto', 'autoPrice', 'priceSource', 'pulseDiscount',
     'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
-    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer',
+    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost',
     'specGame', 'specManufacturer'];
 
   function openSettings() {
@@ -1329,6 +1356,7 @@
     settings.priceMultiplier = numOr(settings.priceMultiplier, 1);
     settings.minPrice = numOr(settings.minPrice, 0);
     settings.pulseDiscount = Math.min(90, Math.max(0, numOr(settings.pulseDiscount, 10)));
+    settings.photoBoost = Math.min(30, Math.max(0, numOr(settings.photoBoost, 8)));
     settings.categoryId = String(settings.categoryId).trim() || DEFAULT_SETTINGS.categoryId;
     if (!String(settings.descTemplate).trim()) settings.descTemplate = DEFAULT_DESC;
     for (const k of ['shippingPolicy', 'returnPolicy', 'paymentPolicy', 'location', 'specGame', 'specManufacturer']) {
