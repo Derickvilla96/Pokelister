@@ -474,7 +474,13 @@
     if (!pulseOn) return { text: 'Pulse isn\'t set up (add PULSE_API_KEY on Render). Type the Pulse price in.', bad: true };
     if (!p) return { text: 'No Pulse price yet.', bad: true, fetch: true };
     if (p.status === 'pending') return { text: 'Checking Pulse…', bad: false };
-    if (p.status === 'ok') return { text: `From PulseTCG (${p.basis || 'market'}).`, bad: false };
+    if (p.status === 'ok') {
+      const parts = [];
+      if (typeof p.market === 'number') parts.push(`market price £${p.market.toFixed(2)}`);
+      if (typeof p.cmNm === 'number') parts.push(`Cardmarket NM £${p.cmNm.toFixed(2)}`);
+      const using = p.basis && p.basis.startsWith('Cardmarket') ? ' (using Cardmarket NM, no market price)' : '';
+      return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.`, bad: false, recheck: true };
+    }
     if (p.status === 'nomatch') return { text: 'Pulse couldn\'t match this card. Type its Pulse price from the PulseTCG app.', bad: true, fetch: true };
     if (p.status === 'limit') return { text: p.error || 'Daily Pulse limit reached. Type the price in.', bad: true };
     return { text: 'Pulse lookup failed' + (p.error ? `: ${p.error}` : '') + '.', bad: true, fetch: true };
@@ -857,7 +863,7 @@
               <input data-f="pulseManual" inputmode="decimal" value="${esc(r.pulseManual || '')}"
                 placeholder="${r.pulse && r.pulse.status === 'ok' ? esc(r.pulse.gbp.toFixed(2)) : 'from PulseTCG app'}"></label>
             ${showUse ? '<button class="btn small" data-a="usePrice">Apply rule</button>' : ''}
-            ${st.fetch && pulseOn ? '<button class="btn small" data-a="getPulse">Check Pulse</button>' : ''}
+            ${(st.fetch || st.recheck) && pulseOn ? `<button class="btn small" data-a="getPulse">${st.recheck ? 'Recheck' : 'Check Pulse'}</button>` : ''}
           </div>
           <div class="pulse-status${st.bad ? ' bad' : ''}">${esc(st.text)}</div>
         </div>`;
@@ -1344,9 +1350,19 @@
   bindEvents();
   renderList();
   renderNextHint();
+  // Cards priced before the switch to Pulse's market price get re-checked once.
+  const PULSE_PRICE_VERSION = 2;
+  async function upgradeOldPulsePrices() {
+    if (!usePulse() || !pulseOn) return;
+    const old = rows.filter((r) => r.pulse && r.pulse.status === 'ok' && r.pulse.v !== PULSE_PRICE_VERSION);
+    for (const r of old) await fetchPulse(r); // one at a time, one lookup each
+    if (old.length) toast(`Updated ${old.length} Pulse price${old.length === 1 ? '' : 's'} to the market price`);
+  }
+
   fetch('/api/health').then((r) => r.json()).then((h) => {
     applyHealth(h);
     if (h.passwordRequired && !settings.password) openSettings();
+    else upgradeOldPulsePrices();
   }).catch(() => {});
 
   // exposed for debugging in the browser console
