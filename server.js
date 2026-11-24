@@ -5,6 +5,7 @@
 // Environment variables:
 //   ANTHROPIC_API_KEY   required — used to read the cards in your photos
 //   APP_PASSWORD        recommended — stops anyone else using your API credit
+//   IMGBB_API_KEY       recommended — hosts your front/back photos so eBay can pull them in
 //   POKEMONTCG_API_KEY  optional — free key from dev.pokemontcg.io (higher rate limit)
 //   MODEL               optional — defaults to claude-sonnet-5-5
 //   PORT                set automatically by Render
@@ -19,6 +20,7 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || '';
 const MODEL = process.env.MODEL || 'claude-sonnet-5-5';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const PTCG_KEY = process.env.POKEMONTCG_API_KEY || '';
+const IMGBB_KEY = process.env.IMGBB_API_KEY || '';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const MAX_BODY_BYTES = 15 * 1024 * 1024;
 const PTCG_URL = 'https://api.pokemontcg.io/v2/cards';
@@ -52,7 +54,8 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
   "confidence": 0.9
 }]}
 "first_edition" is true only if a 1st Edition stamp is visible. "confidence" is a number from 0 to 1 for how sure you are of the name AND number.
-If no card is visible, reply {"cards":[]}.`;
+If the photo shows only the BACK of a card or cards (the standard blue Poké Ball back) and no card fronts, reply {"cards":[],"card_back":true}.
+If no card is visible at all, reply {"cards":[]}.`;
 
 // ---------- small helpers ----------
 
@@ -174,7 +177,67 @@ async function identifyCards(base64, mediaType) {
   const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
   const parsed = parseLooseJSON(text);
   const cards = Array.isArray(parsed.cards) ? parsed.cards : [];
-  return cards.map(cleanDetected).filter((c) => c.name || c.number);
+  return {
+    cards: cards.map(cleanDetected).filter((c) => c.name || c.number),
+    cardBack: parsed.card_back === true,
+  };
+}
+
+// ---------- photo hosting (ImgBB) ----------
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function uploadToImgbb(base64, name) {
+  if (!IMGBB_KEY) throw new Error('IMGBB_API_KEY is not set on the server');
+  const form = new URLSearchParams();
+  form.set('image', base64);
+  if (name) form.set('name', name);
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await sleep(1500 * attempt);
+    let result;
+    try {
+      result = await fetchJSON(`https://api.imgbb.com/1/upload?key=${encodeURIComponent(IMGBB_KEY)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form.toString(),
+      }, 60000);
+    } catch (e) {
+      lastErr = new Error('ImgBB: ' + e.message);
+      continue; // network error or timeout: try again
+    }
+    const { ok, status, data } = result;
+    if (ok && data && data.success && data.data && data.data.url) {
+      return { url: data.data.url, deleteUrl: data.data.delete_url || '' };
+    }
+    const msg = data && data.error && data.error.message ? data.error.message : `HTTP ${status}`;
+    lastErr = new Error('ImgBB: ' + msg);
+    if (!(status === 429 || status >= 500)) break; // not worth retrying
+  }
+  throw lastErr;
+}
+
+function parseImageBody(body) {
+  let img = String((body && body.image) || '');
+  let mediaType = 'image/jpeg';
+  const m = img.match(/^data:(image\/[a-z+.-]+);base64,/i);
+  if (m) {
+    mediaType = m[1].toLowerCase();
+    img = img.slice(m[0].length);
+  }
+  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mediaType)) {
+    throw Object.assign(new Error('Unsupported image type'), { status: 400 });
+  }
+  if (img.length < 100) throw Object.assign(new Error('No image received'), { status: 400 });
+  return { img, mediaType };
+}
+
+async function readJSONBody(req) {
+  try {
+    return JSON.parse(await readBody(req));
+  } catch (e) {
+    throw Object.assign(new Error(e.message === 'Upload too large' ? e.message : 'Bad request'), { status: 400 });
+  }
 }
 
 // ---------- step 2: match against the card database ----------
@@ -284,26 +347,9 @@ function statusFor(d, candidates) {
 // ---------- routes ----------
 
 async function handleIdentify(req, res) {
-  let body;
-  try {
-    body = JSON.parse(await readBody(req));
-  } catch (e) {
-    return sendJSON(res, 400, { error: e.message === 'Upload too large' ? e.message : 'Bad request' });
-  }
-  let img = String(body.image || '');
-  let mediaType = 'image/jpeg';
-  const m = img.match(/^data:(image\/[a-z+.-]+);base64,/i);
-  if (m) {
-    mediaType = m[1].toLowerCase();
-    img = img.slice(m[0].length);
-  }
-  if (!['image/jpeg', 'image/png', 'image/webp', 'image/gif'].includes(mediaType)) {
-    return sendJSON(res, 400, { error: 'Unsupported image type' });
-  }
-  if (img.length < 100) return sendJSON(res, 400, { error: 'No image received' });
-
+  const { img, mediaType } = parseImageBody(await readJSONBody(req));
   const t0 = Date.now();
-  const detected = await identifyCards(img, mediaType);
+  const { cards: detected, cardBack } = await identifyCards(img, mediaType);
   const cards = await mapLimit(detected, 3, async (d) => {
     try {
       const candidates = await lookupCard(d);
@@ -312,8 +358,18 @@ async function handleIdentify(req, res) {
       return { detected: d, candidates: [], status: 'nomatch', error: e.message };
     }
   });
-  console.log(`identify: ${cards.length} card(s) in ${Date.now() - t0}ms`);
-  sendJSON(res, 200, { cards });
+  console.log(`identify: ${cards.length} card(s)${cardBack ? ' (card back)' : ''} in ${Date.now() - t0}ms`);
+  sendJSON(res, 200, { cards, cardBack: cardBack && !cards.length });
+}
+
+async function handlePhoto(req, res) {
+  const body = await readJSONBody(req);
+  const { img } = parseImageBody(body);
+  const name = str(body.name).replace(/[^\w.-]/g, '').slice(0, 80);
+  const t0 = Date.now();
+  const out = await uploadToImgbb(img, name);
+  console.log(`photo: uploaded in ${Date.now() - t0}ms`);
+  sendJSON(res, 200, out);
 }
 
 async function handleSearch(url, res) {
@@ -361,18 +417,20 @@ const server = http.createServer(async (req, res) => {
           claudeKeySet: !!ANTHROPIC_API_KEY,
           model: MODEL,
           passwordRequired: !!APP_PASSWORD,
+          photoHostSet: !!IMGBB_KEY,
         });
       }
       if (!authorised(req)) return sendJSON(res, 401, { error: 'Wrong or missing app password' });
       if (url.pathname === '/api/auth') return sendJSON(res, 200, { ok: true });
       if (url.pathname === '/api/identify' && req.method === 'POST') return await handleIdentify(req, res);
       if (url.pathname === '/api/search' && req.method === 'GET') return await handleSearch(url, res);
+      if (url.pathname === '/api/photo' && req.method === 'POST') return await handlePhoto(req, res);
       return sendJSON(res, 404, { error: 'Not found' });
     }
     return serveStatic(url.pathname, res);
   } catch (e) {
-    console.error(e);
-    if (!res.headersSent) sendJSON(res, 500, { error: e.message || 'Server error' });
+    if (!e.status) console.error(e);
+    if (!res.headersSent) sendJSON(res, e.status || 500, { error: e.message || 'Server error' });
   }
 });
 
@@ -381,6 +439,7 @@ if (require.main === module) {
     console.log(`PokeLister running on port ${PORT} (model: ${MODEL})`);
     if (!ANTHROPIC_API_KEY) console.warn('Warning: ANTHROPIC_API_KEY is not set');
     if (!APP_PASSWORD) console.warn('Warning: APP_PASSWORD is not set — anyone with the URL can use your API credit');
+    if (!IMGBB_KEY) console.warn('Note: IMGBB_API_KEY is not set — your photos will not be added to listings');
   });
 }
 
