@@ -370,7 +370,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
-const PULSE_PRICE_VERSION = 2; // bump to ignore prices cached under an older rule
+const PULSE_PRICE_VERSION = 3; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
@@ -436,7 +436,7 @@ async function pulseSearch(params) {
     throw Object.assign(new Error(`Daily Pulse limit (${PULSE_DAILY_LIMIT}) reached — type the price in by hand`), { code: 'limit' });
   }
   pulseUsage.count++;
-  const qs = new URLSearchParams({ ...params, exclude_graded: 'true', exclude_conditioned: 'true', limit: '10' });
+  const qs = new URLSearchParams({ exclude_graded: 'true', exclude_conditioned: 'true', limit: '10', ...params });
   const { ok, status, data } = await fetchJSON(`${PULSE_SEARCH_URL}?${qs}`, { headers: { 'x-api-key': PULSE_KEY } }, 20000);
   if (!ok) throw new Error(`Pulse search returned ${status}`);
   return Array.isArray(data && data.data) ? data.data : [];
@@ -456,37 +456,53 @@ function pulsePriceOf(r) {
 
 // Pick the result that matches our set (Pulse product ids look like "card:sv3pt5|199/165|...",
 // using the same set ids as the card database) and card number.
-function pickPulseResult(results, setId, cardNumber) {
-  let best = null;
-  let bestScore = -1;
-  for (const r of results) {
-    if (!pulsePriceOf(r)) continue;
-    let s = 0;
-    const pid = String(r.product_id || '').toLowerCase();
-    if (setId && pid.startsWith(`card:${String(setId).toLowerCase()}|`)) s += 3;
-    if (cardNumber && sameCardNumber(r.card_number, cardNumber)) s += 3;
-    if (s > bestScore) { best = r; bestScore = s; }
-  }
-  // When we know the set, insist on set AND number, so we never price a different printing.
-  if (setId) return bestScore >= 6 ? best : null;
-  // Without a set, accept a number match only if it's unambiguous (one set has that number).
-  const numberMatches = results.filter((r) => pulsePriceOf(r) && cardNumber && sameCardNumber(r.card_number, cardNumber));
-  const sets = new Set(numberMatches.map((r) => String(r.product_id || '').split('|')[0]));
-  return numberMatches.length && sets.size === 1 ? numberMatches[0] : null;
+// Pulse product ids look like "card:<set>|<number>|<variant>|...". Foreign printings have
+// set parts ending in _jp, _kr, _cn etc.
+function pulseSetPart(r) {
+  return String((r && r.product_id) || '').toLowerCase().split('|')[0].replace(/^card:/, '');
+}
+function isForeignPrinting(r) {
+  return /_(jp|kr|cn|tw|th|id|ja|ko|zh)$/.test(pulseSetPart(r)) || /[_-](jp|kr|cn|tw)[_-]/.test(pulseSetPart(r));
 }
 
-async function pulseLookup({ name, number, total, setId, setLabel }) {
+// Returns { result, how } or null. how = 'set+number' (safe) or 'number' (no set confirmation).
+function pickPulseResult(results, setId, cardNumber, english = true) {
+  const usable = results.filter((r) => pulsePriceOf(r) && !(english && isForeignPrinting(r)));
+  const numberMatches = cardNumber ? usable.filter((r) => sameCardNumber(r.card_number, cardNumber)) : [];
+  if (setId) {
+    const exact = numberMatches.find((r) => pulseSetPart(r) === String(setId).toLowerCase());
+    if (exact) return { result: exact, how: 'set+number' };
+  }
+  // No set confirmation: accept only if every number match comes from one single set,
+  // so we never pick between two different printings.
+  const sets = new Set(numberMatches.map(pulseSetPart));
+  if (numberMatches.length && sets.size === 1) return { result: numberMatches[0], how: 'number' };
+  return null;
+}
+
+// "034" + "086" -> ["034/086", "34/86"]; letters (TG05/TG30, SWSH050) are kept as printed
+function cardNumberVariants(number, total) {
+  const n = String(number || '').trim();
+  const t = String(total || '').trim();
+  if (!n) return [];
+  if (!t) return [n];
+  if (/[A-Z]/i.test(n + t)) return [`${n}/${t}`];
+  const pad = (x) => String(parseInt(x, 10)).padStart(3, '0');
+  return [...new Set([`${n}/${t}`, `${pad(n)}/${pad(t)}`, `${parseInt(n, 10)}/${parseInt(t, 10)}`])];
+}
+
+async function pulseLookup({ name, number, total, setId, setLabel, language }) {
   if (!PULSE_KEY) return { status: 'off' };
-  const printed = number ? (total && !/[A-Z]/i.test(number) ? `${number}/${total}` : number) : '';
+  const variants = cardNumberVariants(number, total);
+  const printed = variants[0] || '';
+  const english = !language || /^english$/i.test(language);
   const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
   const hit = pulseCache.get(key);
   if (hit && Date.now() - hit.at < (hit.result.status === 'ok' ? PULSE_CACHE_MS : PULSE_NOMATCH_CACHE_MS)) return hit.result;
 
   const q = pulseName(name);
-  const tries = [];
-  if (q && printed) tries.push({ q, card_number: printed });
-  if (q && printed && /^0\d/.test(number)) tries.push({ q, card_number: `${numPart(number)}/${total}` }); // 025/198 -> 25/198
-  if (q) tries.push({ q });
+  const tries = variants.map((cn) => ({ q, card_number: cn }));
+  if (q) tries.push({ q, limit: '40' }); // name only, wider net
 
   let result = null;
   const tried = [];
@@ -495,14 +511,17 @@ async function pulseLookup({ name, number, total, setId, setLabel }) {
     tried.push({
       search: [params.q, params.card_number].filter(Boolean).join(' '),
       results: found.length,
-      sample: found.slice(0, 3).map((r) => String(r.product_id || r.card_number || '?')),
+      sample: found.filter((r) => !(english && isForeignPrinting(r))).slice(0, 3).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')),
+      foreignSkipped: english ? found.filter(isForeignPrinting).length : 0,
     });
-    const best = pickPulseResult(found, setId, printed);
-    if (best) {
+    const pick = pickPulseResult(found, setId, printed, english);
+    if (pick) {
+      const best = pick.result;
       const price = pulsePriceOf(best);
       result = {
         v: PULSE_PRICE_VERSION, status: 'ok', gbp: price.gbp, basis: price.basis, market: price.market, cmNm: price.cmNm,
         productId: best.product_id || '', cardNumber: best.card_number || '',
+        matchedBy: pick.how,
       };
       break;
     }
@@ -516,14 +535,16 @@ async function pulseLookup({ name, number, total, setId, setLabel }) {
 // Works out what to ask Pulse for, from the database match (preferred) or what the AI read.
 function pulseQueryFor(candidate, detected) {
   if (candidate) {
-    const printedNum = detected && detected.number && numPart(detected.number) === numPart(candidate.number)
-      ? detected.number : candidate.number;
-    return { name: candidate.name, number: printedNum, total: String(candidate.printedTotal || ''),
-      setId: candidate.setId, setLabel: candidate.setName };
+    const d = detected || {};
+    const printedNum = d.number && numPart(d.number) === numPart(candidate.number) ? d.number : candidate.number;
+    // keep the total as printed on the card ("086", not "86") when it's the same number
+    const printedTotal = d.set_total && numPart(d.set_total) === numPart(candidate.printedTotal) ? d.set_total : String(candidate.printedTotal || '');
+    return { name: candidate.name, number: printedNum, total: printedTotal,
+      setId: candidate.setId, setLabel: candidate.setName, language: detected && detected.language };
   }
   const d = detected || {};
   return { name: d.name, number: d.number, total: d.set_total,
-    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code };
+    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language };
 }
 
 async function safePulse(query) {
@@ -568,7 +589,8 @@ async function handlePulse(url, res) {
   const g = (k) => str(url.searchParams.get(k));
   if (!g('name') && !g('number')) return sendJSON(res, 400, { error: 'Need a card name or number' });
   const setId = g('setId') || guessSetId(g('setCode'), g('setName'));
-  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId, setLabel: g('setName') || g('setCode') || setId });
+  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId,
+    setLabel: g('setName') || g('setCode') || setId, language: g('language') });
   sendJSON(res, 200, { pulse: result, creditsLeft: pulseCreditsLeft() });
 }
 
@@ -659,4 +681,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
