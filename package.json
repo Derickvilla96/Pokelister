@@ -1,0 +1,13 @@
+{
+  "name": "pokelister",
+  "version": "1.0.0",
+  "description": "Photograph Pokémon cards, identify them, and export eBay draft listings",
+  "main": "server.js",
+  "private": true,
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
