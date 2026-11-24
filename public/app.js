@@ -32,6 +32,8 @@
     defaultCondition: 'Near Mint',
     includeStockPhoto: false,
     autoPrice: true,
+    priceSource: 'pulse',
+    pulseDiscount: 10,
     eurToGbp: 0.85,
     priceMultiplier: 1,
     minPrice: 0.99,
@@ -103,6 +105,7 @@
   let rows = load(LS_ROWS, []);
   let onlyCheck = false;
   let photoHost = true;          // updated from /api/health
+  let pulseOn = true;            // updated from /api/health
   let nextRole = 'front';        // in front & back mode: what the next photo is
   let lastFrontJobId = null;
   let jobSeq = 0;
@@ -369,6 +372,8 @@
       qty: settings.defaultQty || 1,
       price: '',
       priceAuto: true,
+      pulse: result.pulse || null,
+      pulseManual: '',
       title: '',
       titleEdited: false,
       createdAt: Date.now(),
@@ -420,13 +425,80 @@
     return t.slice(0, 80);
   }
 
+  const usePulse = () => settings.priceSource !== 'cardmarket';
+  const round2 = (n) => Math.round(n * 100) / 100;
+
+  // The price the rule gives, or null if there's nothing to base it on.
   function suggestedPrice(r) {
+    const min = Number(settings.minPrice || 0);
+    if (usePulse()) {
+      const manual = parseFloat(String(r.pulseManual || '').replace(',', '.'));
+      const hasManual = isFinite(manual) && manual > 0;
+      const fetched = r.pulse && r.pulse.status === 'ok' ? r.pulse.gbp : null;
+      const base = hasManual ? manual : fetched;
+      if (base == null) return null;
+      const discounted = round2(base * (1 - Number(settings.pulseDiscount || 0) / 100));
+      return { source: 'pulse', base, manual: hasManual, discounted, raisedToMin: discounted < min, gbp: Math.max(min, discounted) };
+    }
     const c = chosen(r);
     if (!c) return null;
     const eur = r.finish === 'reverse holo' && c.cmReverseHoloTrend ? c.cmReverseHoloTrend : c.cmTrend;
     if (!eur) return null;
-    const gbp = eur * Number(settings.eurToGbp || 0.85) * Number(settings.priceMultiplier || 1);
-    return { eur, gbp: Math.max(Number(settings.minPrice || 0), gbp) };
+    const gbp = round2(eur * Number(settings.eurToGbp || 0.85) * Number(settings.priceMultiplier || 1));
+    return { source: 'cardmarket', eur, raisedToMin: gbp < min, gbp: Math.max(min, gbp) };
+  }
+
+  function ruleSummary() {
+    if (!settings.autoPrice) return 'Auto-pricing is <strong>off</strong>: you type every price yourself.';
+    const min = Number(settings.minPrice || 0);
+    const minText = min > 0 ? `, never below £${min.toFixed(2)}` : '';
+    return usePulse()
+      ? `Your pricing rule: <strong>Pulse price − ${Number(settings.pulseDiscount || 0)}%</strong>${minText}.`
+      : `Your pricing rule: <strong>Cardmarket trend × ${settings.eurToGbp} × ${settings.priceMultiplier}</strong>${minText}.`;
+  }
+
+  // The reminder shown on each card, e.g. "Pulse £4.70 − 10% = £4.23"
+  function ruleText(r) {
+    const sp = suggestedPrice(r);
+    if (!sp) return '';
+    const minNote = sp.raisedToMin ? ` → raised to your £${Number(settings.minPrice).toFixed(2)} minimum` : '';
+    if (sp.source === 'pulse') {
+      return `Rule (set in Settings): ${sp.manual ? 'your Pulse price' : 'Pulse'} £${sp.base.toFixed(2)} − ${Number(settings.pulseDiscount || 0)}% = <strong>£${sp.discounted.toFixed(2)}</strong>${minNote}`;
+    }
+    return `Rule (set in Settings): Cardmarket €${sp.eur.toFixed(2)} → <strong>£${sp.gbp.toFixed(2)}</strong>${minNote}`;
+  }
+
+  function pulseStatusText(r) {
+    const p = r.pulse;
+    if (r.pulseManual && parseFloat(r.pulseManual) > 0) return { text: 'Using the Pulse price you typed in.', bad: false };
+    if (!pulseOn) return { text: 'Pulse isn\'t set up (add PULSE_API_KEY on Render). Type the Pulse price in.', bad: true };
+    if (!p) return { text: 'No Pulse price yet.', bad: true, fetch: true };
+    if (p.status === 'pending') return { text: 'Checking Pulse…', bad: false };
+    if (p.status === 'ok') return { text: `From PulseTCG (${p.basis || 'market'}).`, bad: false };
+    if (p.status === 'nomatch') return { text: 'Pulse couldn\'t match this card. Type its Pulse price from the PulseTCG app.', bad: true, fetch: true };
+    if (p.status === 'limit') return { text: p.error || 'Daily Pulse limit reached. Type the price in.', bad: true };
+    return { text: 'Pulse lookup failed' + (p.error ? `: ${p.error}` : '') + '.', bad: true, fetch: true };
+  }
+
+  async function fetchPulse(r) {
+    if (!usePulse() || !pulseOn) return;
+    const c = chosen(r);
+    const d = r.detected || {};
+    const q = c
+      ? { name: c.name, number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
+          total: String(c.printedTotal || ''), setId: c.setId || '' }
+      : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '' };
+    r.pulse = { status: 'pending' };
+    rerenderRow(r);
+    try {
+      const data = await api('/api/pulse?' + new URLSearchParams(q).toString());
+      r.pulse = data.pulse || { status: 'error' };
+    } catch (e) {
+      r.pulse = { status: 'error', error: e.message };
+    }
+    refreshDerived(r);
+    rerenderRow(r);
+    saveRows();
   }
 
   function applyAutoPrice(r, force) {
@@ -774,10 +846,26 @@
     const finishOpts = FINISHES.map(([v, l]) => `<option value="${v}"${v === r.finish ? ' selected' : ''}>${l}</option>`).join('');
     const badge = r.status === 'ok' ? '<span class="badge ok">✓ OK</span>'
       : `<span class="badge warn">${r.status === 'nomatch' ? 'No match' : 'Check'}</span>`;
-    const priceHint = sp
-      ? `<div class="price-hint">Cardmarket trend €${sp.eur.toFixed(2)} ≈ £${sp.gbp.toFixed(2)}
-           <button class="btn small" data-a="usePrice">Use</button></div>`
-      : (c ? '<div class="price-hint">No Cardmarket price for this card</div>' : '');
+    let priceHint;
+    if (usePulse()) {
+      const st = pulseStatusText(r);
+      const showUse = sp && priceStr(r.price) !== sp.gbp.toFixed(2);
+      priceHint = `<div class="pulse-box">
+          <div class="rule-text">${sp ? ruleText(r) : ruleSummary()}</div>
+          <div class="pulse-row">
+            <label class="field"><span>Pulse price £ (type to override)</span>
+              <input data-f="pulseManual" inputmode="decimal" value="${esc(r.pulseManual || '')}"
+                placeholder="${r.pulse && r.pulse.status === 'ok' ? esc(r.pulse.gbp.toFixed(2)) : 'from PulseTCG app'}"></label>
+            ${showUse ? '<button class="btn small" data-a="usePrice">Apply rule</button>' : ''}
+            ${st.fetch && pulseOn ? '<button class="btn small" data-a="getPulse">Check Pulse</button>' : ''}
+          </div>
+          <div class="pulse-status${st.bad ? ' bad' : ''}">${esc(st.text)}</div>
+        </div>`;
+    } else {
+      priceHint = sp
+        ? `<div class="price-hint">${ruleText(r)} <button class="btn small" data-a="usePrice">Use</button></div>`
+        : (c ? '<div class="price-hint">No Cardmarket price for this card</div>' : '');
+    }
     const notes = r.detected && r.detected.notes ? `<p class="notes">AI note: ${esc(r.detected.notes)}</p>` : '';
     const results = searchResults.get(r.id) || [];
     const busy = !!r._uploading;
@@ -873,6 +961,7 @@
       ${noBack ? `<span class="warn">${noBack} no back</span>` : ''}
       ${noSpecs ? `<span class="warn">${noSpecs} specifics missing</span>` : ''}
       <span class="muted">${settings.exportMode === 'drafts' ? 'Exporting drafts' : 'Exporting live listings'}</span>
+      <span class="muted small">${ruleSummary()}</span>
       <span>£${total.toFixed(2)}</span>
       <label class="small"><input type="checkbox" id="onlyCheck"${onlyCheck ? ' checked' : ''}> Only to check</label>`;
   }
@@ -963,6 +1052,21 @@
         saveRows();
         return;
       }
+      if (f === 'pulseManual') {
+        // update price + reminder live without redrawing (keeps the keyboard open)
+        r.pulseManual = e.target.value.replace(',', '.');
+        applyAutoPrice(r);
+        const node = e.target.closest('.card-row');
+        node.querySelector('[data-f="price"]').value = r.price;
+        node.querySelector('.rule-text').innerHTML = suggestedPrice(r) ? ruleText(r) : ruleSummary();
+        const st = pulseStatusText(r);
+        const stEl = node.querySelector('.pulse-status');
+        stEl.textContent = st.text;
+        stEl.classList.toggle('bad', !!st.bad);
+        renderSummary();
+        saveRows();
+        return;
+      }
       if (f === 'title') {
         r.title = e.target.value;
         if (!r.titleEdited) {
@@ -993,8 +1097,11 @@
       if (f === 'chosen') {
         r.chosen = parseInt(e.target.value, 10);
         r.status = r.chosen >= 0 ? 'ok' : 'check';
+        r.pulseManual = ''; // a typed Pulse price belonged to the old match
+        r.pulse = null;
         refreshDerived(r);
         rerenderRow(r);
+        fetchPulse(r);
       } else if (f === 'condition') {
         r.condition = e.target.value;
       } else if (f === 'finish') {
@@ -1009,6 +1116,8 @@
         r.qty = Math.max(1, parseInt(e.target.value, 10) || 1);
         e.target.value = r.qty;
         renderSummary();
+      } else if (f === 'price' || f === 'pulseManual') {
+        rerenderRow(r); // show/hide "Apply rule" once you've finished typing
       }
       saveRows();
     });
@@ -1082,10 +1191,15 @@
         r.chosen = 0;
         r.status = 'ok';
         r._searchOpen = false;
+        r.pulseManual = '';
+        r.pulse = null;
         searchResults.delete(r.id);
         refreshDerived(r);
         rerenderRow(r);
         saveRows();
+        fetchPulse(r);
+      } else if (a === 'getPulse') {
+        fetchPulse(r);
       }
     });
 
@@ -1104,6 +1218,17 @@
     $('#closeSettings').addEventListener('click', closeSettings);
     $('#settings').addEventListener('click', (e) => { if (e.target.id === 'settings') closeSettings(); });
     $('#saveSettings').addEventListener('click', saveSettings);
+    // live preview of the pricing rule while editing (not saved until you tap Save)
+    const previewRule = () => {
+      const saved = settings;
+      settings = { ...saved };
+      readSettingsForm();
+      const html = ruleSummary();
+      settings = saved;
+      $('#ruleReminder').innerHTML = html + ' <em>(tap Save to apply)</em>';
+    };
+    $('#settings').addEventListener('input', previewRule);
+    $('#settings').addEventListener('change', previewRule);
     $('#repriceBtn').addEventListener('click', () => {
       readSettingsForm();
       store(LS_SETTINGS, settings);
@@ -1121,7 +1246,8 @@
   // ---------- settings ----------
 
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
-    'defaultCondition', 'includeStockPhoto', 'autoPrice', 'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
+    'defaultCondition', 'includeStockPhoto', 'autoPrice', 'priceSource', 'pulseDiscount',
+    'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
     'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer',
     'specGame', 'specManufacturer'];
 
@@ -1134,6 +1260,7 @@
     }
     $('#settings').hidden = false;
     document.body.classList.add('sheet-open');
+    $('#ruleReminder').innerHTML = ruleSummary();
     checkServer();
   }
 
@@ -1152,6 +1279,7 @@
     settings.eurToGbp = numOr(settings.eurToGbp, DEFAULT_SETTINGS.eurToGbp);
     settings.priceMultiplier = numOr(settings.priceMultiplier, 1);
     settings.minPrice = numOr(settings.minPrice, 0);
+    settings.pulseDiscount = Math.min(90, Math.max(0, numOr(settings.pulseDiscount, 10)));
     settings.categoryId = String(settings.categoryId).trim() || DEFAULT_SETTINGS.categoryId;
     if (!String(settings.descTemplate).trim()) settings.descTemplate = DEFAULT_DESC;
     for (const k of ['shippingPolicy', 'returnPolicy', 'paymentPolicy', 'location', 'specGame', 'specManufacturer']) {
@@ -1176,6 +1304,7 @@
 
   function applyHealth(h) {
     photoHost = !!h.photoHostSet;
+    pulseOn = !!h.pulseSet;
     $('#photoHostWarn').hidden = photoHost;
     renderList();
   }
@@ -1190,7 +1319,8 @@
       el.textContent = (h.claudeKeySet
         ? `Server OK · AI model: ${h.model}`
         : 'Server is up, but ANTHROPIC_API_KEY is not set on Render')
-        + (h.photoHostSet ? ' · Photo hosting on' : ' · Photo hosting off (no IMGBB_API_KEY)');
+        + (h.photoHostSet ? ' · Photo hosting on' : ' · Photo hosting off (no IMGBB_API_KEY)')
+        + (h.pulseSet ? ` · Pulse on (${h.pulseCreditsLeft} of ${h.pulseDailyLimit} lookups left today)` : ' · Pulse off (no PULSE_API_KEY)');
       return h;
     } catch (e) {
       el.textContent = 'Could not reach the server (Render may be waking up — try again in a minute)';

@@ -102,12 +102,22 @@
     <p class="help">eBay wants photos of the actual item for used cards, so add your own photos on the drafts as well.</p>
 
     <h3>Pricing</h3>
-    <label class="check"><input id="s_autoPrice" type="checkbox"> Auto-fill price from Cardmarket trend</label>
+    <p id="ruleReminder" class="rule-reminder"></p>
+    <label class="check"><input id="s_autoPrice" type="checkbox"> Auto-fill prices using the rule</label>
     <div class="field-row">
-      <label class="field"><span>€ → £ rate</span><input id="s_eurToGbp" inputmode="decimal"></label>
-      <label class="field"><span>Multiplier</span><input id="s_priceMultiplier" inputmode="decimal"></label>
-      <label class="field"><span>Min £</span><input id="s_minPrice" inputmode="decimal"></label>
+      <label class="field"><span>Price source</span>
+        <select id="s_priceSource">
+          <option value="pulse">PulseTCG</option>
+          <option value="cardmarket">Cardmarket (from card database)</option>
+        </select></label>
+      <label class="field"><span>Pulse discount %</span><input id="s_pulseDiscount" inputmode="decimal"></label>
     </div>
+    <div class="field-row">
+      <label class="field"><span>Min £</span><input id="s_minPrice" inputmode="decimal"></label>
+      <label class="field"><span>€ → £ (Cardmarket)</span><input id="s_eurToGbp" inputmode="decimal"></label>
+      <label class="field"><span>× (Cardmarket)</span><input id="s_priceMultiplier" inputmode="decimal"></label>
+    </div>
+    <p class="help">Postage isn't added to the price; buyers pay it through your postage policy.</p>
 
     <h3>Description template</h3>
     <textarea id="s_descTemplate" rows="8"></textarea>
