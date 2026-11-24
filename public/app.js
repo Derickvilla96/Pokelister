@@ -480,12 +480,17 @@
       if (typeof p.market === 'number') parts.push(`market price £${p.market.toFixed(2)}`);
       if (typeof p.cmNm === 'number') parts.push(`Cardmarket NM £${p.cmNm.toFixed(2)}`);
       const using = p.basis && p.basis.startsWith('Cardmarket') ? ' (using Cardmarket NM, no market price)' : '';
-      return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.`, bad: false, recheck: true };
+      const loose = p.matchedBy === 'number'
+        ? ` Matched by card number only (Pulse ${p.productId ? 'listed it as ' + p.productId.split('|').slice(0, 2).join(' ') : 'had no set confirmation'}), so double-check this price.`
+        : '';
+      return { text: `From PulseTCG: ${parts.join(' · ') || p.basis}${using}.${loose}`, bad: !!loose, recheck: true };
     }
     if (p.status === 'nomatch') {
       let why = '';
       if (p.tried && p.tried.length) {
-        const looked = p.tried.map((t) => `"${t.search}" (${t.results} result${t.results === 1 ? '' : 's'}${t.sample && t.sample.length ? ': ' + t.sample.join(', ') : ''})`).join('; ');
+        const looked = p.tried.map((t) => `"${t.search}" (${t.results} result${t.results === 1 ? '' : 's'}`
+          + (t.foreignSkipped ? `, ${t.foreignSkipped} foreign skipped` : '')
+          + (t.sample && t.sample.length ? ': ' + t.sample.join(', ') : '') + ')').join('; ');
         const wanted = [p.wanted && p.wanted.number, p.wanted && p.wanted.set].filter(Boolean).join(', ');
         why = ` Searched ${looked}${wanted ? `; needed ${wanted}` : ''}.`;
       }
@@ -501,9 +506,10 @@
     const d = r.detected || {};
     const q = c
       ? { name: c.name, number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
-          total: String(c.printedTotal || ''), setId: c.setId || '' }
+          total: d.set_total && normNumber(d.set_total) === normNumber(c.printedTotal) ? d.set_total : String(c.printedTotal || ''),
+          setId: c.setId || '', setName: c.setName || '', language: d.language || '' }
       : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '',
-          setCode: d.set_code || '', setName: d.set_name || '' };
+          setCode: d.set_code || '', setName: d.set_name || '', language: d.language || '' };
     r.pulse = { status: 'pending' };
     rerenderRow(r);
     try {
@@ -1388,7 +1394,7 @@
   renderList();
   renderNextHint();
   // Cards priced before the switch to Pulse's market price get re-checked once.
-  const PULSE_PRICE_VERSION = 2;
+  const PULSE_PRICE_VERSION = 3;
   async function upgradeOldPulsePrices() {
     if (!usePulse() || !pulseOn) return;
     const old = rows.filter((r) => r.pulse && r.pulse.status === 'ok' && r.pulse.v !== PULSE_PRICE_VERSION);
