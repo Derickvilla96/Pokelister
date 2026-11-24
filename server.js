@@ -356,6 +356,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
+const PULSE_PRICE_VERSION = 2; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const pulseUsage = { day: '', count: 0 };
 
@@ -396,11 +397,15 @@ async function pulseSearch(params) {
   return Array.isArray(data && data.data) ? data.data : [];
 }
 
+// Use Pulse's headline "Market price" (what the PulseTCG app shows), falling back to the
+// Cardmarket Near Mint price only when there's no market price. Both are returned so the
+// app can show them side by side.
 function pulsePriceOf(r) {
   const p = (r && r.prices) || {};
-  const nm = p.cm && p.cm.gbp && typeof p.cm.gbp.nm === 'number' ? p.cm.gbp.nm : null;
-  if (nm != null) return { gbp: nm, basis: 'Cardmarket NM' };
-  if (typeof p.market_price === 'number') return { gbp: p.market_price, basis: 'market' };
+  const market = typeof p.market_price === 'number' && p.market_price > 0 ? p.market_price : null;
+  const cmNm = p.cm && p.cm.gbp && typeof p.cm.gbp.nm === 'number' && p.cm.gbp.nm > 0 ? p.cm.gbp.nm : null;
+  if (market != null) return { gbp: market, basis: 'market price', market, cmNm };
+  if (cmNm != null) return { gbp: cmNm, basis: 'Cardmarket NM (no market price)', market, cmNm };
   return null;
 }
 
@@ -428,7 +433,7 @@ function pickPulseResult(results, setId, cardNumber) {
 async function pulseLookup({ name, number, total, setId }) {
   if (!PULSE_KEY) return { status: 'off' };
   const printed = number ? (total && !/[A-Z]/i.test(number) ? `${number}/${total}` : number) : '';
-  const key = `${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
+  const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}`;
   const hit = pulseCache.get(key);
   if (hit && Date.now() - hit.at < PULSE_CACHE_MS) return hit.result;
 
@@ -444,7 +449,10 @@ async function pulseLookup({ name, number, total, setId }) {
     const best = pickPulseResult(found, setId, printed);
     if (best) {
       const price = pulsePriceOf(best);
-      result = { status: 'ok', gbp: price.gbp, basis: price.basis, productId: best.product_id || '', cardNumber: best.card_number || '' };
+      result = {
+        v: PULSE_PRICE_VERSION, status: 'ok', gbp: price.gbp, basis: price.basis, market: price.market, cmNm: price.cmNm,
+        productId: best.product_id || '', cardNumber: best.card_number || '',
+      };
       break;
     }
   }
