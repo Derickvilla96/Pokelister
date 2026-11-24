@@ -40,6 +40,7 @@
     descTemplate: DEFAULT_DESC,
     pairsMode: true,
     photoBoost: 8,
+    autoLevels: true,
     exportMode: 'live',
     shippingPolicy: '',
     returnPolicy: '',
@@ -188,18 +189,56 @@
     const ctx = c.getContext('2d');
     ctx.drawImage(img, 0, 0, w, h);
     const boost = Number(settings.photoBoost || 0) / 100;
-    if (boost > 0) {
-      const lut = brightenLUT(boost);
+    const auto = settings.autoLevels !== false;
+    if (boost > 0 || auto) {
       const data = ctx.getImageData(0, 0, w, h);
       const px = data.data;
+      const luts = auto ? autoLevelLUTs(px, boost, w, h) : [brightenLUT(boost), brightenLUT(boost), brightenLUT(boost)];
       for (let i = 0; i < px.length; i += 4) {
-        px[i] = lut[px[i]];
-        px[i + 1] = lut[px[i + 1]];
-        px[i + 2] = lut[px[i + 2]];
+        px[i] = luts[0][px[i]];
+        px[i + 1] = luts[1][px[i + 1]];
+        px[i + 2] = luts[2][px[i + 2]];
       }
       ctx.putImageData(data, 0, 0);
     }
     return c.toDataURL('image/jpeg', quality);
+  }
+
+  // Per-photo correction: measure the background around the edges of the photo, lift it to
+  // near-white and remove a slight colour cast there, then lift midtones by `boost`.
+  // (The brightest pixels are often holo glare, so they're a poor guide to the background.)
+  function autoLevelLUTs(px, boost, w, h) {
+    const L = (i) => px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114;
+    const bw = Math.max(2, Math.round(w * 0.06)), bh = Math.max(2, Math.round(h * 0.06));
+    const edge = [];
+    for (let y = 0; y < h; y += 3) {
+      for (let x = 0; x < w; x += 3) {
+        if (x >= bw && x < w - bw && y >= bh && y < h - bh) { x = w - bw - 1; continue; } // skip the middle
+        edge.push((y * w + x) * 4);
+      }
+    }
+    const lums = edge.map(L).sort((a, b) => a - b);
+    const median = lums.length ? lums[lums.length >> 1] : 255;
+    let sr = 0, sg = 0, sb = 0, m = 0;
+    for (const i of edge) {
+      if (Math.abs(L(i) - median) <= 20) { sr += px[i]; sg += px[i + 1]; sb += px[i + 2]; m++; }
+    }
+    let avg = m ? [sr / m, sg / m, sb / m] : [255, 255, 255];
+    // A dark or strongly coloured background (e.g. a playmat) isn't meant to be white: only brighten gently.
+    const chroma = Math.max(...avg) - Math.min(...avg);
+    if (median < 110 || chroma > 40) avg = [median + 60, median + 60, median + 60].map((v) => Math.min(255, v));
+    const target = 245;
+    const lum = avg[0] * 0.299 + avg[1] * 0.587 + avg[2] * 0.114;
+    const baseGain = Math.min(1.45, Math.max(1, target / Math.max(lum, 1))); // never darken, cap the lift
+    const gamma = 1 / (1 + boost);
+    return avg.map((a) => {
+      // neutralise a cast in the background, but only by up to ±8% per channel
+      const cast = Math.min(1.08, Math.max(0.92, lum / Math.max(a, 1)));
+      const gain = baseGain * cast;
+      const lut = new Uint8ClampedArray(256);
+      for (let v = 0; v < 256; v++) lut[v] = Math.round(255 * Math.pow(Math.min(1, (v * gain) / 255), gamma));
+      return lut;
+    });
   }
 
   async function prepareFile(file) {
@@ -1384,7 +1423,7 @@
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
     'defaultCondition', 'includeStockPhoto', 'autoPrice', 'priceSource', 'pulseDiscount',
     'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
-    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost',
+    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost', 'autoLevels',
     'specGame', 'specManufacturer'];
 
   function openSettings() {
