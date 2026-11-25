@@ -168,7 +168,7 @@ function cleanDetected(c) {
   };
 }
 
-async function identifyCards(base64, mediaType) {
+async function identifyCards(base64, mediaType, photoContext) {
   if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY is not set on the server');
   const body = {
     model: MODEL,
@@ -177,7 +177,7 @@ async function identifyCards(base64, mediaType) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: mediaType, data: base64 } },
-        { type: 'text', text: PROMPT },
+        { type: 'text', text: PROMPT + contextNote(photoContext) },
       ],
     }],
   };
@@ -201,6 +201,14 @@ async function identifyCards(base64, mediaType) {
     cards: cards.map(cleanDetected).filter((c) => c.name || c.number),
     cardBack: parsed.card_back === true,
   };
+}
+
+// The seller's usual photo setup, so the AI doesn't treat it as a problem.
+function contextNote(ctx) {
+  const c = str(ctx).slice(0, 200);
+  if (!c) return '';
+  return `\n\nAbout these photos: ${c} This is intentional. Don't mention it in "notes", and don't lower "confidence" `
+    + 'or report "finish" as unknown because of it. Only lower confidence if the name or number itself is hard to read.';
 }
 
 // ---------- photo hosting (ImgBB) ----------
@@ -371,6 +379,18 @@ async function lookupCard(d) {
     .slice(0, 10);
   if (!list.length && lastErr) throw lastErr;
   return list;
+}
+
+// Plain-English reasons a card needs checking
+function reasonsFor(d, candidates) {
+  const out = [];
+  if (!candidates.length) return ['no card in the database matched'];
+  const top = candidates[0];
+  const runnerUp = candidates[1];
+  if (d.confidence < 0.6) out.push('the AI wasn\'t sure it read the name or number correctly');
+  if (top.score < 7) out.push('the database match isn\'t exact (name, number or set differ slightly)');
+  if (runnerUp && top.score <= runnerUp.score) out.push('two database cards matched equally well');
+  return out;
 }
 
 function statusFor(d, candidates) {
@@ -638,7 +658,8 @@ async function matchOne(d) {
     error = e.message;
   }
   const pulse = await safePulse(pulseQueryFor(candidates[0], d));
-  return { detected: d, candidates, status: error || !candidates.length ? 'nomatch' : statusFor(d, candidates), pulse, ...(error ? { error } : {}) };
+  return { detected: d, candidates, status: error || !candidates.length ? 'nomatch' : statusFor(d, candidates),
+    reasons: error ? ['the card database didn\'t answer'] : reasonsFor(d, candidates), pulse, ...(error ? { error } : {}) };
 }
 
 async function handleMatch(req, res) {
@@ -648,9 +669,10 @@ async function handleMatch(req, res) {
 }
 
 async function handleIdentify(req, res) {
-  const { img, mediaType } = parseImageBody(await readJSONBody(req));
+  const body = await readJSONBody(req);
+  const { img, mediaType } = parseImageBody(body);
   const t0 = Date.now();
-  const { cards: detected, cardBack } = await identifyCards(img, mediaType);
+  const { cards: detected, cardBack } = await identifyCards(img, mediaType, body.photoContext);
   const cards = await mapLimit(detected, 3, matchOne);
   console.log(`identify: ${cards.length} card(s)${cardBack ? ' (card back)' : ''} in ${Date.now() - t0}ms`);
   sendJSON(res, 200, { cards, cardBack: cardBack && !cards.length });
