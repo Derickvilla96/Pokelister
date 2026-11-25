@@ -248,3 +248,26 @@ body.sheet-open { overflow: hidden; }
 }
 
 .stamp-flag { font-style: normal; color: var(--accent); }
+
+/* "Already on eBay?" section */
+.live-section { margin-top: 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.live-section > summary {
+  list-style: none; cursor: pointer; padding: 12px; display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  font-weight: 700; font-size: 15px;
+}
+.live-section > summary::-webkit-details-marker { display: none; }
+.live-section > summary em { font-style: normal; font-weight: 400; color: var(--muted); font-size: 13px; display: block; }
+.live-badge { flex: 0 0 auto; font-size: 12px; padding: 3px 8px; border-radius: 99px; background: var(--panel2); color: var(--muted); font-weight: 700; }
+.live-badge.ok { background: rgba(60, 207, 122, 0.15); color: var(--ok); }
+.live-badge.warn { background: rgba(255, 176, 32, 0.15); color: var(--warn); }
+.live-steps { margin: 0; padding: 0 14px 14px 34px; display: flex; flex-direction: column; gap: 10px; font-size: 14px; }
+.live-steps li { line-height: 1.45; }
+.live-steps em { font-style: normal; color: var(--accent); }
+.live-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 6px; }
+.live-match {
+  display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px;
+  background: rgba(80, 150, 255, 0.12); border: 1px solid rgba(80, 150, 255, 0.45); font-size: 13px;
+}
+.live-match strong { color: #8ab8ff; }
+.live-match.done { background: rgba(60, 207, 122, 0.12); border-color: rgba(60, 207, 122, 0.45); }
+.summary .live { color: #8ab8ff; }
