@@ -55,7 +55,7 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
   "rarity": "your best guess at the rarity",
   "finish": "one of: normal, holo, reverse holo, unknown",
   "first_edition": false,
-  "stamp": "any stamp printed on the card itself, described briefly (e.g. 'Twilight Masquerade' set-logo stamp, 'Prerelease', 'Pokémon Center', 'Staff', 'Worlds 2023'), or empty string if none",
+  "stamp": "ONLY if a stamp is clearly visible on the card: its short name, max 30 characters, e.g. 'Twilight Masquerade', 'Prerelease', 'Pokémon Center', 'Staff'. Empty string if there is no stamp or you're not sure (mention a possible stamp in notes instead)",
   "language": "English, Japanese, etc.",
   "notes": "anything a seller should know: graded slab, visible damage, promo stamp, card hard to read; empty string if nothing",
   "confidence": 0.9
@@ -136,6 +136,18 @@ function parseLooseJSON(text) {
 
 // ---------- step 1: read the cards in the photo ----------
 
+// "'Scarlet & Violet Twilight Masquerade' set-logo stamp on the artwork" -> "Twilight Masquerade"
+function shortStamp(v) {
+  let t = str(v).replace(/["'‘’“”]/g, '');
+  if (/^(none|no|n\/a|null)$/i.test(t)) return '';
+  t = t.replace(/\b(on|in) the (artwork|art|card|text box|image)\b/gi, '')
+    .replace(/\bscarlet\s*(&|and)\s*violet\b/gi, '')
+    .replace(/\bsword\s*(&|and)\s*shield\b(?!.*base)/gi, '')
+    .replace(/\b(set[- ]?logo|logo|stamped|stamp|foil|gold|silver)\b/gi, '')
+    .replace(/\s+/g, ' ').replace(/^[\s,.\-–()]+|[\s,.\-–()]+$/g, '').trim();
+  return t.slice(0, 30).trim() || (str(v) ? 'Stamped' : '');
+}
+
 function cleanDetected(c) {
   const finish = str(c.finish).toLowerCase();
   let confidence = Number(c.confidence);
@@ -149,7 +161,7 @@ function cleanDetected(c) {
     rarity: str(c.rarity),
     finish: ['normal', 'holo', 'reverse holo'].includes(finish) ? finish : 'unknown',
     first_edition: c.first_edition === true,
-    stamp: str(c.stamp).replace(/^(none|no|n\/a)$/i, ''),
+    stamp: shortStamp(c.stamp),
     language: str(c.language) || 'English',
     notes: str(c.notes),
     confidence: Math.max(0, Math.min(1, confidence)),
@@ -471,8 +483,13 @@ function isForeignPrinting(r) {
 
 // The card database and Pulse spell some set ids differently, e.g. Mega Evolution is
 // "me1" in the database but "m1" in Pulse. Compare them in one shared form.
+// Spellings seen so far: Mega Evolution "me1" (database) / "m1" (Pulse),
+// Phantasmal Flames "me2" / "me02". So "me" = "m", and leading zeros don't count.
 function normSetId(id) {
-  return String(id || '').toLowerCase().replace(/^card:/, '').replace(/^me(\d)/, 'm$1');
+  return String(id || '').toLowerCase().trim()
+    .replace(/^card:/, '')
+    .replace(/^me(?=\d)/, 'm')         // me1 -> m1, me02 -> m02
+    .replace(/^([a-z]+)0+(?=\d)/, '$1'); // m02 -> m2, sv01 -> sv1
 }
 
 // The version part of a Pulse product id: "card:sv6pt5|012/064|Holo|..." -> "holo"
@@ -735,4 +752,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
