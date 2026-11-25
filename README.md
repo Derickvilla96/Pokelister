@@ -99,6 +99,20 @@ Default rule: **listing price = Pulse price − 10%**, never below your **Min £
 - Changing the match re-checks Pulse. Lookups are cached for a day, and PokeLister stops at `PULSE_DAILY_LIMIT` lookups a day, because PokeSnipe uses the same 1,000-credit daily budget.
 - Change the discount, minimum or source (Pulse or Cardmarket) in Settings → Pricing, then tap **Re-apply auto prices** to reprice everything.
 
+## Already on eBay? (avoiding duplicate listings)
+
+The **📋 Already on eBay?** section near the top of the app shows these steps:
+
+1. **Before each batch**, download your live listings: Seller Hub → Reports → Downloads → Download report → Source: Listings → Type: **All active listings** → Download. Don't open it in Excel first, because Excel turns item numbers into "2.67E+11".
+2. **Load it** with **Load active listings report**.
+3. **Scan as normal.** A card that's already live (same card, stamp, reverse holo and 1st Edition) gets a blue **Already live on eBay** box with the item number and quantity. Choose **Add to listing** (raises the live listing's quantity) or **List separately**.
+4. **Export.** **Download CSV** gives the new listings only. **Download quantity update CSV** in the section gives a small file that raises the quantity on the live listings (`Revise, ItemID, Quantity`).
+5. **Upload both** in Seller Hub → Reports → Uploads, then **Clear all**. Next time, start again from step 1, so cards that have sold are accounted for.
+
+How matching works: PokeLister reads the card id from its own SKUs (e.g. `PKM-sv3-179-…` → sv3-179) plus "Stamped", "Reverse Holo" and "1st Edition" in the title. For listings you made by hand, it matches on name and card number from the title. The report doesn't include card condition, so only add a copy to a live listing if it's in the same condition. Adding to a listing keeps the live listing's price.
+
+The loaded report is stored on your phone. If it's more than a day old, the section warns you to download a fresh one.
+
 ## Uploading to eBay
 
 1. Seller Hub → **Reports** → **Uploads** → **Upload template**, then pick the CSV.
