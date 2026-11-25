@@ -40,6 +40,7 @@
     descTemplate: DEFAULT_DESC,
     pairsMode: true,
     photoBoost: 8,
+    photoContext: 'Cards are photographed standing upright on a clear acrylic display stand, against a plain background.',
     autoLevels: true,
     exportMode: 'live',
     shippingPolicy: '',
@@ -105,8 +106,7 @@
 
   let settings = { ...DEFAULT_SETTINGS, ...load(LS_SETTINGS, {}) };
   let rows = load(LS_ROWS, []);
-  const LS_LIVE = 'pokelister.live.v1';
-  let live = load(LS_LIVE, null); // last loaded eBay "All active listings" report
+  try { localStorage.removeItem('pokelister.live.v1'); } catch (e) { /* old 'Already on eBay' report, feature removed */ }
   let onlyCheck = false;
   let photoHost = true;          // updated from /api/health
   let pulseOn = true;            // updated from /api/health
@@ -317,7 +317,7 @@
           .then((u) => { job.frontUrl = u; })
           .catch((e) => { job.uploadError = e.message; });
       }
-      const data = await api('/api/identify', { method: 'POST', body: JSON.stringify({ image: job.prepared.full }) });
+      const data = await api('/api/identify', { method: 'POST', body: JSON.stringify({ image: job.prepared.full, photoContext: settings.photoContext || '' }) });
       const cards = data.cards || [];
 
       if (!cards.length && data.cardBack) {
@@ -445,6 +445,7 @@
       pulse: result.pulse || null,
       pulseManual: '',
       dbError: result.error || '',
+      reasons: Array.isArray(result.reasons) ? result.reasons : [],
       title: '',
       titleEdited: false,
       createdAt: Date.now(),
@@ -453,8 +454,9 @@
       const rarity = ((chosen(row) || {}).rarity || d.rarity || '').toLowerCase();
       row.finish = rarity.includes('holo') ? 'holo' : 'normal';
       if (row.status === 'ok') row.status = 'check'; // AI wasn't sure of the finish
+      row.reasons.push(`the AI couldn't tell the finish, so it guessed ${row.finish === 'holo' ? 'Holo' : 'Normal'}`);
     }
-    if (row.stamp && row.status === 'ok') row.status = 'check'; // stamps are easy to misread: confirm them
+    if (row.stamp) { row.reasons.push(`confirm the ${row.stamp} stamp`); if (row.status === 'ok') row.status = 'check'; } // stamps are easy to misread
     applyAutoPrice(row);
     row.title = buildTitle(row);
     return row;
@@ -841,13 +843,8 @@
     return `${exportPrefix()}-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`;
   }
 
-  function readyToExport(list) {
-    const rows = list; // only the cards that become new listings
-    const onLive = liveAdds().size;
-    if (!rows.length) {
-      toast(onLive ? 'Every card is going onto a live listing: use "Download quantity update CSV" in the Already on eBay section' : 'No cards to export');
-      return false;
-    }
+  function readyToExport() {
+    if (!rows.length) { toast('No cards to export'); return false; }
     const live = settings.exportMode !== 'drafts';
     if (live) {
       const missingSettings = [];
@@ -880,24 +877,19 @@
     if (noBack) issues.push(`${noBack} without a back photo`);
     if (noSpecs) issues.push(`${noSpecs} with item specifics missing`);
     if (issues.length && !confirm(`${issues.join(', ')}. Export anyway?`)) return false;
-    const liveNote = onLive ? `\n\nCards going onto ${onLive} live listing${onLive === 1 ? '' : 's'} are left out: download those from the Already on eBay section.` : '';
-    if (live && !confirm(`Export ${rows.length} LIVE listing${rows.length === 1 ? '' : 's'}? They go live as soon as you upload the file to eBay.${liveNote}`)) return false;
-    if (!live && liveNote && !confirm(liveNote.trim())) return false;
+    if (live && !confirm(`Export ${rows.length} LIVE listing${rows.length === 1 ? '' : 's'}? They go live as soon as you upload the file to eBay.`)) return false;
     return true;
   }
 
   function downloadCSV() {
-    const list = exportRows();
-    if (!readyToExport(list)) return;
-    saveFile(buildCSV(list), exportName());
-    const pending = [...liveAdds().values()].filter((g) => g.rows.some((r) => !r.liveExported)).length;
-    toast(`Exported ${list.length} card${list.length === 1 ? '' : 's'}` + (pending ? `. Don't forget the quantity update for ${pending} live listing${pending === 1 ? '' : 's'}` : ''));
+    if (!readyToExport()) return;
+    saveFile(buildCSV(rows), exportName());
+    toast(`Exported ${rows.length} card${rows.length === 1 ? '' : 's'}`);
   }
 
   async function shareCSV() {
-    const list = exportRows();
-    if (!readyToExport(list)) return;
-    const file = new File([buildCSV(list)], exportName(), { type: 'text/csv' });
+    if (!readyToExport()) return;
+    const file = new File([buildCSV(rows)], exportName(), { type: 'text/csv' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
       try {
         await navigator.share({ files: [file], title: 'eBay drafts' });
@@ -907,177 +899,6 @@
     } else {
       toast('Sharing files is not supported here — use Download');
     }
-  }
-
-  // ---------- already on eBay (Active listings report) ----------
-
-  function parseCSV(text) {
-    const out = [];
-    let row = [], cell = '', q = false;
-    text = String(text || '').replace(/^﻿/, '');
-    for (let i = 0; i < text.length; i++) {
-      const ch = text[i];
-      if (q) {
-        if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch;
-      } else if (ch === '"') q = true;
-      else if (ch === ',') { row.push(cell); cell = ''; }
-      else if (ch === '\n' || ch === '\r') {
-        if (ch === '\r' && text[i + 1] === '\n') i++;
-        row.push(cell); out.push(row); row = []; cell = '';
-      } else cell += ch;
-    }
-    if (cell || row.length) { row.push(cell); out.push(row); }
-    return out;
-  }
-
-  const normName = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-
-  // "Greedent ex 179/197 Obsidian Flames ..." -> "greedent ex|179/197"
-  function titleKey(title) {
-    const m = String(title || '').match(/^(.*?)\s+([A-Za-z]*\d+[A-Za-z]*)\s*\/\s*([A-Za-z]*\d+[A-Za-z]*)\b/);
-    return m ? `${normName(m[1])}|${normNumber(m[2])}/${normNumber(m[3])}` : '';
-  }
-
-  function flagsFromTitle(t) {
-    return `${/\bstamped\b/i.test(t) ? 1 : 0}${/reverse holo/i.test(t) ? 1 : 0}${/1st edition/i.test(t) ? 1 : 0}`;
-  }
-  function flagsFromRow(r) {
-    return `${shortStamp(r.stamp) ? 1 : 0}${r.finish === 'reverse holo' ? 1 : 0}${r.firstEd ? 1 : 0}`;
-  }
-
-  // Card id from a PokeLister SKU: "PKM-sv3-179-LLDS" -> "sv3-179"
-  function idFromSku(sku) {
-    const m = String(sku || '').match(/^[^-]+-(.+)-[A-Z0-9]{4}$/i);
-    return m && m[1] !== 'X' ? m[1].toLowerCase() : '';
-  }
-
-  function loadLiveReport(text, fileName) {
-    const table = parseCSV(text).filter((r) => r.some((c) => c.trim()));
-    const hi = table.findIndex((r) => r.some((c) => /^\s*item (number|id)\s*$/i.test(c) || /^\s*itemid\s*$/i.test(c)));
-    if (hi < 0) throw new Error("That doesn't look like an eBay \"All active listings\" report (no Item number column).");
-    const h = table[hi].map((c) => c.trim().toLowerCase());
-    const col = (...names) => h.findIndex((c) => names.includes(c));
-    const ci = { id: col('item number', 'item id', 'itemid'), title: col('title', 'item title'), sku: col('custom label (sku)', 'custom label', 'sku', 'customlabel'),
-      qty: col('available quantity', 'quantity available', 'quantity'), price: col('current price', 'start price', 'price', 'startprice') };
-    const items = [];
-    for (const r of table.slice(hi + 1)) {
-      const id = String(r[ci.id] || '').trim();
-      if (!/^\d{9,15}$/.test(id)) {
-        if (/e\+?\d+$/i.test(id)) throw new Error('The item numbers in this file have been changed by Excel (e.g. 2.67E+11). Download the report again and load it without opening it.');
-        continue;
-      }
-      const title = ci.title >= 0 ? r[ci.title] || '' : '';
-      const sku = ci.sku >= 0 ? r[ci.sku] || '' : '';
-      items.push({
-        itemId: id, title, sku,
-        qty: Math.max(0, parseInt(ci.qty >= 0 ? r[ci.qty] : '1', 10) || 0),
-        price: ci.price >= 0 ? (parseFloat(String(r[ci.price]).replace(/[^\d.]/g, '')) || 0) : 0,
-        cardId: idFromSku(sku), tkey: titleKey(title), flags: flagsFromTitle(title),
-      });
-    }
-    if (!items.length) throw new Error('No live listings found in that file.');
-    live = { loadedAt: Date.now(), fileName: fileName || '', items };
-    store(LS_LIVE, live);
-    for (const r of rows) { delete r.liveExported; }
-    return items.length;
-  }
-
-  // The live listing this card duplicates, if any.
-  function liveMatchFor(r) {
-    if (!live || !live.items || !live.items.length) return null;
-    const i = cardInfo(r);
-    const flags = flagsFromRow(r);
-    const id = String(i.id || '').toLowerCase();
-    let m = id && live.items.find((x) => x.cardId === id && x.flags === flags);
-    if (m) return { item: m, how: 'id' };
-    const tk = i.name && i.number ? `${normName(i.name)}|${i.number.split('/').map(normNumber).join('/')}` : '';
-    m = tk && live.items.find((x) => x.tkey === tk && x.flags === flags);
-    return m ? { item: m, how: 'title' } : null;
-  }
-
-  const goesOnLive = (r) => !!liveMatchFor(r) && r.liveAction !== 'new';
-  const exportRows = () => rows.filter((r) => !goesOnLive(r));
-
-  // How many copies are being added to each live listing
-  function liveAdds() {
-    const adds = new Map();
-    for (const r of rows) {
-      const m = liveMatchFor(r);
-      if (!m || r.liveAction === 'new') continue;
-      const cur = adds.get(m.item.itemId) || { item: m.item, add: 0, rows: [] };
-      cur.add += parseInt(r.qty, 10) || 1;
-      cur.rows.push(r);
-      adds.set(m.item.itemId, cur);
-    }
-    return adds;
-  }
-
-  function liveMatchHtml(r) {
-    const m = liveMatchFor(r);
-    if (!m) return '';
-    const it = m.item;
-    const group = liveAdds().get(it.itemId);
-    const after = it.qty + (group ? group.add : 0);
-    const price = it.price ? ` at £${it.price.toFixed(2)}` : '';
-    if (r.liveExported && r.liveAction !== 'new') {
-      return `<div class="live-match done"><span>✓ <strong>Quantity update downloaded</strong> for live item ${esc(it.itemId)}. Upload it in Seller Hub, then remove this card.</span></div>`;
-    }
-    return `<div class="live-match">
-      <span><strong>Already live on eBay</strong>: item ${esc(it.itemId)}, ${it.qty} available${price}${m.how === 'title' ? ' (matched by name and number)' : ''}.</span>
-      <label class="field"><span>When you export</span>
-        <select data-f="liveAction">
-          <option value="add"${r.liveAction !== 'new' ? ' selected' : ''}>Add to listing: qty ${it.qty} → ${r.liveAction !== 'new' ? after : after + (parseInt(r.qty, 10) || 1)}</option>
-          <option value="new"${r.liveAction === 'new' ? ' selected' : ''}>List separately (new listing)</option>
-        </select></label>
-      <span class="muted">Only add it if it's in the same condition as the live one${it.price && priceStr(r.price) && Math.abs(it.price - parseFloat(r.price)) >= 0.01 ? `; the live listing stays at £${it.price.toFixed(2)} (this card's price, £${priceStr(r.price)}, isn't used)` : ''}.</span>
-    </div>`;
-  }
-
-  function buildQtyCSV(groups) {
-    const lines = [['Action(SiteID=UK|Country=GB|Currency=GBP|Version=1193|CC=UTF-8)', 'ItemID', 'Quantity'].map(csvCell).join(',')];
-    for (const g of groups) lines.push(['Revise', g.item.itemId, g.item.qty + g.add].map(csvCell).join(','));
-    return lines.join('\r\n') + '\r\n';
-  }
-
-  function downloadQtyCSV() {
-    const groups = [...liveAdds().values()].filter((g) => g.rows.some((r) => !r.liveExported));
-    if (!groups.length) { toast('No cards are set to be added to live listings'); return; }
-    const summary = groups.map((g) => `• ${g.item.title.slice(0, 40)}: ${g.item.qty} → ${g.item.qty + g.add}`).join('\n');
-    if (!confirm(`Download a quantity update for ${groups.length} live listing${groups.length === 1 ? '' : 's'}?\n\n${summary}`)) return;
-    const d = new Date();
-    const p = (n) => String(n).padStart(2, '0');
-    saveFile(buildQtyCSV(groups), `ebay-quantity-update-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}.csv`);
-    // remember the new quantities so pressing the button again can't add the same copies twice
-    for (const g of groups) { g.item.qty += g.add; for (const r of g.rows) r.liveExported = true; }
-    store(LS_LIVE, live);
-    saveRows();
-    renderList();
-    renderLive();
-    toast('Quantity update downloaded. Upload it in Seller Hub, then remove those cards');
-  }
-
-  function renderLive() {
-    const badge = $('#liveBadge');
-    const status = $('#liveStatus');
-    const n = rows.filter((r) => liveMatchFor(r)).length;
-    const pending = [...liveAdds().values()].filter((g) => g.rows.some((r) => !r.liveExported)).length;
-    $('#liveQtyBtn').disabled = !pending;
-    $('#liveQtyBtn').textContent = pending ? `Download quantity update CSV (${pending} listing${pending === 1 ? '' : 's'})` : 'Download quantity update CSV';
-    $('#liveForgetBtn').hidden = !live;
-    if (!live) {
-      badge.className = 'live-badge';
-      badge.textContent = 'No report loaded';
-      status.textContent = 'No report loaded yet, so PokeLister can\'t warn you about cards that are already live.';
-      return;
-    }
-    const ageH = (Date.now() - live.loadedAt) / 36e5;
-    const when = new Date(live.loadedAt).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-    const stale = ageH > 24;
-    badge.className = 'live-badge ' + (stale ? 'warn' : 'ok');
-    badge.textContent = stale ? 'Report is old' : (n ? `${n} already live` : `${live.items.length} live loaded`);
-    status.textContent = `Loaded ${live.items.length} live listing${live.items.length === 1 ? '' : 's'} on ${when}.`
-      + (stale ? ' That was over a day ago: download a fresh report so sold cards are accounted for.' : '')
-      + (n ? ` ${n} card${n === 1 ? ' in your list is' : 's in your list are'} already live.` : '');
   }
 
   function saveFile(text, name) {
@@ -1224,7 +1045,7 @@
           <div class="row-name">${esc(i.name || 'Unknown card')} <span class="muted">${esc(i.number)}</span></div>
           ${badge}
         </div>
-        ${liveMatchHtml(r)}
+        ${r.status !== 'ok' && r.reasons && r.reasons.length ? `<p class="why-check">Why check: ${r.reasons.map(esc).join('; ')}.</p>` : ''}
         <label class="field"><span>Match</span>
           <select data-f="chosen">${options}<option value="-1"${r.chosen === -1 ? ' selected' : ''}>None – use what the AI read</option></select>
         </label>
@@ -1291,22 +1112,19 @@
     const el = $('#summary');
     $('#empty').hidden = rows.length > 0;
     el.hidden = !rows.length;
-    if (!rows.length) { renderLive(); return; }
+    if (!rows.length) return;
     const qty = rows.reduce((n, r) => n + (parseInt(r.qty, 10) || 1), 0);
     const toCheck = rows.filter((r) => r.status !== 'ok').length;
     const noPrice = rows.filter((r) => !priceStr(r.price)).length;
     const noBack = rows.filter((r) => !r.backPhoto).length;
     const noSpecs = rows.filter((r) => missingSpecifics(r).length).length;
     const total = rows.reduce((s, r) => s + (parseFloat(priceStr(r.price)) || 0) * (parseInt(r.qty, 10) || 1), 0);
-    const onLive = rows.filter(goesOnLive).length;
-    renderLive();
     el.innerHTML = `
       <span><strong>${rows.length}</strong> listing${rows.length === 1 ? '' : 's'} (${qty} cards)</span>
       ${toCheck ? `<span class="warn">${toCheck} to check</span>` : ''}
       ${noPrice ? `<span class="warn">${noPrice} no price</span>` : ''}
       ${noBack ? `<span class="warn">${noBack} no back</span>` : ''}
       ${noSpecs ? `<span class="warn">${noSpecs} specifics missing</span>` : ''}
-      ${onLive ? `<span class="live">${onLive} going onto live listings</span>` : ''}
       <span class="muted">${settings.exportMode === 'drafts' ? 'Exporting drafts' : 'Exporting live listings'}</span>
       <span class="muted small">${ruleSummary()}</span>
       <span>£${total.toFixed(2)}</span>
@@ -1329,28 +1147,6 @@
         e.target.value = '';
       });
     }
-    $('#liveLoadBtn').addEventListener('click', () => $('#liveInput').click());
-    $('#liveInput').addEventListener('change', async (e) => {
-      const f = e.target.files && e.target.files[0];
-      e.target.value = '';
-      if (!f) return;
-      try {
-        const n = loadLiveReport(await f.text(), f.name);
-        renderList();
-        const dupes = rows.filter((r) => liveMatchFor(r)).length;
-        toast(`Loaded ${n} live listing${n === 1 ? '' : 's'}` + (dupes ? `. ${dupes} card${dupes === 1 ? ' is' : 's are'} already live` : ''));
-      } catch (err) {
-        alert(err.message);
-      }
-    });
-    $('#liveForgetBtn').addEventListener('click', () => {
-      if (!confirm('Forget the loaded active listings report?')) return;
-      live = null;
-      try { localStorage.removeItem(LS_LIVE); } catch (e) { /* ignore */ }
-      renderList();
-    });
-    $('#liveQtyBtn').addEventListener('click', downloadQtyCSV);
-
     $('#rowPhotoInput').addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       e.target.value = '';
@@ -1481,9 +1277,6 @@
         }
         refreshDerived(r);
         rerenderRow(r);
-      } else if (f === 'liveAction') {
-        r.liveAction = e.target.value;
-        renderList(); // other copies of the same card show the new quantity too
       } else if (f === 'pulseVersion') {
         const ver = r.pulse && r.pulse.versions && r.pulse.versions[parseInt(e.target.value, 10)];
         usePulseVersion(r, ver, true);
@@ -1599,6 +1392,7 @@
           r.chosen = r.candidates.length ? 0 : -1;
           r.status = m.status || (r.chosen >= 0 ? 'check' : 'nomatch');
           r.dbError = m.error || '';
+          r.reasons = Array.isArray(m.reasons) ? m.reasons : [];
           r.pulse = m.pulse || null;
           r.pulseManual = '';
           refreshDerived(r);
@@ -1658,7 +1452,7 @@
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
     'defaultCondition', 'includeStockPhoto', 'autoPrice', 'priceSource', 'pulseDiscount',
     'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
-    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost', 'autoLevels',
+    'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost', 'autoLevels', 'photoContext',
     'specGame', 'specManufacturer'];
 
   function openSettings() {
@@ -1753,7 +1547,6 @@
   // ---------- start ----------
 
   bindEvents();
-  if (!live || Date.now() - live.loadedAt > 24 * 36e5) $('#liveSection').open = true;
   renderList();
   renderNextHint();
   // Cards priced before the switch to Pulse's market price get re-checked once.

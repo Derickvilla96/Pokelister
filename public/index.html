@@ -33,23 +33,6 @@
     <p id="photoHostWarn" class="hint warn-text" hidden>Photo hosting isn't set up (IMGBB_API_KEY on Render), so your photos won't be added to the listings.</p>
   </section>
 
-  <details id="liveSection" class="live-section">
-    <summary><span>📋 Already on eBay? <em>Avoid duplicate listings</em></span><span id="liveBadge" class="live-badge">No report loaded</span></summary>
-    <ol class="live-steps">
-      <li><strong>Download your live listings from eBay</strong> (do this before each batch):<br>
-        Seller Hub → <em>Reports</em> → <em>Downloads</em> → <em>Download report</em> → Source: <em>Listings</em> → Type: <em>All active listings</em> → <em>Download</em>. Don't open it in Excel first.</li>
-      <li><strong>Load it here:</strong>
-        <div class="live-actions"><button id="liveLoadBtn" class="btn small primary">Load active listings report</button>
-        <button id="liveForgetBtn" class="btn small ghost" hidden>Forget it</button></div>
-        <p id="liveStatus" class="help"></p></li>
-      <li><strong>Scan your cards as normal.</strong> Any card that's already live gets a blue <em>Already live on eBay</em> box. Choose <em>Add to that listing</em> (raises its quantity) or <em>List separately</em>.</li>
-      <li><strong>Export:</strong> <em>Download CSV</em> gives the new listings only. Cards going onto live listings come out of this button instead:
-        <div class="live-actions"><button id="liveQtyBtn" class="btn small" disabled>Download quantity update CSV</button></div></li>
-      <li><strong>Upload both files</strong> in Seller Hub → <em>Reports</em> → <em>Uploads</em> → <em>Upload template</em>, then <em>Clear all</em> here. Next time, start again from step 1 so PokeLister knows what's sold.</li>
-    </ol>
-    <input id="liveInput" class="file-input" type="file" accept=".csv,text/csv,text/plain">
-  </details>
-
   <section id="jobs" class="jobs" hidden></section>
 
   <section id="summary" class="summary" hidden></section>
@@ -79,6 +62,9 @@
       <input id="s_password" type="password" autocomplete="current-password"></label>
 
     <h3>Photos</h3>
+    <label class="field"><span>How you photograph your cards</span>
+      <textarea id="s_photoContext" rows="2"></textarea></label>
+    <p class="help">Told to the AI with every photo, so it doesn't flag your setup (e.g. a stand or a sleeve) as a problem. Leave blank to turn off.</p>
     <label class="check"><input id="s_autoLevels" type="checkbox"> Auto-correct each photo (white background, no colour cast)</label>
     <label class="field"><span>Extra brightness %</span>
       <input id="s_photoBoost" inputmode="numeric" placeholder="8"></label>
