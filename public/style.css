@@ -141,6 +141,12 @@ main { max-width: 760px; margin: 0 auto; padding: 14px 14px calc(96px + var(--sa
   display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center;
 }
 .summary .warn { color: var(--warn); }
+.summary .chip {
+  font: inherit; font-size: 14px; padding: 4px 10px; border-radius: 999px; cursor: pointer;
+  background: rgba(255, 176, 32, 0.12); border: 1px solid rgba(255, 176, 32, 0.35);
+}
+.summary .chip.on { background: var(--warn); color: #111; border-color: var(--warn); font-weight: 600; }
+.summary .chip.clear { background: transparent; color: var(--text, #fff); border-color: var(--line); }
 .summary label { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 
 .list { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
@@ -189,6 +195,7 @@ main { max-width: 760px; margin: 0 auto; padding: 14px 14px calc(96px + var(--sa
 
 .search-box { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: var(--panel2); }
 .search-box[hidden] { display: none; }
+.card-row[hidden] { display: none; }
 .s-results { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
 .s-result {
   appearance: none; border: 1px solid var(--line); background: var(--bg); border-radius: 8px;
@@ -250,3 +257,52 @@ body.sheet-open { overflow: hidden; }
 .stamp-flag { font-style: normal; color: var(--accent); }
 
 .why-check { margin: -2px 0 0; font-size: 13px; color: var(--warn); }
+
+/* ---------- tools: check, bulk edit, review, eBay ---------- */
+.summary .tools { display: flex; gap: 8px; width: 100%; flex-wrap: wrap; }
+.summary .chip.good { background: rgba(60, 207, 122, 0.12); border-color: rgba(60, 207, 122, 0.4); color: var(--ok); }
+.summary .chip.good.on { background: var(--ok); color: #111; }
+.sheet textarea.short { min-height: 0; }
+.sheet-actions.left { justify-content: flex-start; flex-wrap: wrap; }
+.ok-text { color: var(--ok); }
+.btn:disabled { opacity: 0.45; }
+
+.check-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.check-list li { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 14px;
+  padding: 8px 10px; border-radius: 8px; background: var(--panel2); }
+.check-list.ok li { color: var(--ok); }
+.check-list.bad li { color: var(--danger); }
+.check-list.warn li { color: var(--warn); }
+.check-list .btn { flex-shrink: 0; }
+
+.listed { margin: 0; padding: 6px 10px; border-radius: 8px; font-size: 13px; color: var(--ok);
+  background: rgba(60, 207, 122, 0.1); border: 1px solid rgba(60, 207, 122, 0.35); }
+.listed a { color: var(--ok); }
+.listing-now { margin: 0; font-size: 13px; color: var(--accent); }
+.card-row.is-listed { opacity: 0.8; }
+
+.row-head .sel { display: flex; align-items: center; padding-right: 6px; }
+.row-head .sel input { width: 24px; height: 24px; accent-color: var(--accent); }
+.card-row.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.bulkbar { align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.bulkbar[hidden], .bottombar[hidden] { display: none; }
+.bulk-count { font-weight: 600; margin-right: auto; }
+
+.review { position: fixed; inset: 0; z-index: 25; background: var(--bg); display: flex; flex-direction: column;
+  padding: calc(8px + env(safe-area-inset-top)) 12px calc(10px + var(--safe-b)); }
+.review[hidden] { display: none; }
+.review-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 8px; }
+.review-body { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; gap: 8px; }
+.review-body > * { flex-shrink: 0; }
+.review-actions { display: grid; grid-template-columns: 1fr 1fr 2fr; gap: 8px; padding-top: 10px; }
+.review-actions .btn { padding: 14px 8px; font-size: 16px; }
+.rv-photos { display: flex; gap: 8px; }
+.rv-main { flex: 1; min-width: 0; max-height: 48vh; object-fit: contain; border-radius: 10px; background: var(--panel2); }
+div.rv-main { display: flex; align-items: center; justify-content: center; min-height: 200px; }
+.rv-side { width: 26%; display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--muted); text-align: center; }
+.rv-side img { width: 100%; border-radius: 6px; background: var(--panel2); }
+.rv-side .empty-img { min-height: 80px; font-size: 11px; }
+.rv-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 18px; }
+.rv-head .badge { margin-left: auto; }
+.review-body > .field, .review-body > .field-row { flex: 0 0 auto; }

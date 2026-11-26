@@ -44,11 +44,79 @@
   </section>
 </main>
 
-<footer class="bottombar">
+<footer class="bottombar" id="mainBar">
   <button id="clearBtn" class="btn ghost">Clear all</button>
   <button id="shareBtn" class="btn">Share CSV</button>
   <button id="exportBtn" class="btn primary">Download CSV</button>
+  <button id="ebayBtn" class="btn primary" hidden>List on eBay</button>
 </footer>
+
+<footer class="bottombar bulkbar" id="bulkBar" hidden>
+  <span id="bulkCount" class="bulk-count">0 selected</span>
+  <button id="bulkAll" class="btn small">All shown</button>
+  <button id="bulkNone" class="btn small">None</button>
+  <button id="bulkEdit" class="btn small primary">Edit…</button>
+  <button id="bulkDone" class="btn small">Done</button>
+</footer>
+
+<!-- pre-upload check -->
+<div id="checkSheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <h2>Pre-upload check</h2>
+      <button class="icon-btn" data-close="checkSheet" aria-label="Close">✕</button>
+    </div>
+    <div id="checkBody"></div>
+  </div>
+</div>
+
+<!-- bulk edit -->
+<div id="bulkSheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <h2 id="bulkTitle">Edit selected cards</h2>
+      <button class="icon-btn" data-close="bulkSheet" aria-label="Close">✕</button>
+    </div>
+    <p class="help">Anything left on "No change" stays as it is on each card.</p>
+    <div class="field-row">
+      <label class="field"><span>Condition</span><select id="b_condition"></select></label>
+      <label class="field"><span>Finish</span><select id="b_finish"></select></label>
+    </div>
+    <label class="field"><span>Card language</span><select id="b_language"></select></label>
+    <p class="help">Changing the language looks each card up again (uses Pulse lookups).</p>
+    <div class="field-row">
+      <label class="field"><span>Price</span>
+        <select id="b_priceMode">
+          <option value="">No change</option>
+          <option value="rule">Apply my pricing rule</option>
+          <option value="set">Set to £…</option>
+          <option value="min">Raise to my minimum if below it</option>
+        </select></label>
+      <label class="field"><span>£</span><input id="b_price" inputmode="decimal" placeholder="1.50"></label>
+    </div>
+    <label class="field"><span>Qty</span><input id="b_qty" inputmode="numeric" placeholder="No change"></label>
+    <label class="check"><input id="b_ok" type="checkbox"> Mark them all OK (checked)</label>
+    <div class="sheet-actions">
+      <button id="bulkRemove" class="btn danger">Remove selected</button>
+      <button id="bulkApply" class="btn primary">Apply</button>
+    </div>
+  </div>
+</div>
+
+<!-- quick review -->
+<div id="review" class="review" hidden>
+  <div class="review-head">
+    <button id="rvClose" class="btn small">Close</button>
+    <span id="rvPos" class="muted"></span>
+    <button id="rvEdit" class="btn small">Full card</button>
+  </div>
+  <div id="rvBody" class="review-body"></div>
+  <div class="review-actions">
+    <button id="rvPrev" class="btn">←</button>
+    <button id="rvSkip" class="btn">Skip</button>
+    <button id="rvGood" class="btn primary">✓ Looks good</button>
+  </div>
+</div>
 
 <div id="settings" class="sheet" hidden>
   <div class="sheet-inner">
@@ -91,6 +159,16 @@
     </div>
     <label class="check"><input id="s_bestOffer" type="checkbox"> Allow Best Offers</label>
 
+    <h3>List straight to eBay</h3>
+    <p id="ebayStatus" class="help">Not connected.</p>
+    <div class="sheet-actions left">
+      <button id="ebayConnect" class="btn">Connect eBay account</button>
+      <button id="ebayCheckPolicies" class="btn" hidden>Check my policies</button>
+      <button id="ebayDisconnect" class="btn ghost" hidden>Disconnect</button>
+    </div>
+    <p id="ebayPolicyResult" class="help"></p>
+    <p class="help">Needs EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME on Render (see the README). Connect once on each device you list from.</p>
+
     <h3>Drafts only</h3>
     <label class="field"><span>Condition ID column</span>
       <input id="s_conditionId" placeholder="leave blank"></label>
@@ -129,6 +207,9 @@
     <p class="help">Postage isn't added to the price; buyers pay it through your postage policy.</p>
 
     <h3>Description template</h3>
+    <label class="field"><span>Always at the top of every description</span>
+      <textarea id="s_topLine" rows="2" class="short"></textarea></label>
+    <p class="help">The pre-upload check puts this first in every listing, and moves it there if your template has it lower down. Leave blank to turn off.</p>
     <textarea id="s_descTemplate" rows="8"></textarea>
     <p class="help">Placeholders: {name} {number} {set} {rarity} {finish} {condition} {language} {edition} {stamp}</p>
 

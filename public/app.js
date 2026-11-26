@@ -51,6 +51,7 @@
     bestOffer: false,
     specGame: 'Pokémon TCG',
     specManufacturer: 'The Pokémon Company',
+    topLine: 'Buying more than one card? Add them all to your basket and check out once – postage is only charged once.',
   };
 
   // eBay card-condition codes for ungraded cards in CCG Individual Cards (183454)
@@ -117,6 +118,9 @@
     noprice: { label: 'no price', test: (r) => !priceStr(r.price) },
     noback: { label: 'no back', test: (r) => !r.backPhoto },
     nospecs: { label: 'specifics missing', test: (r) => missingSpecifics(r).length > 0 },
+    nophoto: { label: 'front photo not uploaded', test: (r) => photoHost && !r.frontUrl },
+    listed: { label: 'listed on eBay', test: (r) => !!r.ebayItemId },
+    ebayfail: { label: 'eBay errors', test: (r) => !!r.ebayError && !r.ebayItemId },
   };
   function setFilter(kind) {
     filterKind = kind && kind !== filterKind ? kind : '';
@@ -770,9 +774,25 @@
       edition: r.firstEd ? '1st Edition' : 'Unlimited',
       stamp: String(r.stamp || '').trim() ? `Stamped: ${String(r.stamp).trim()}` : '',
     };
-    return String(settings.descTemplate || '')
+    const body = String(settings.descTemplate || '')
       .replace(/\{(\w+)\}/g, (m, k) => (k in map ? esc(map[k]) : m))
       .replace(/\r?\n/g, '<br>');
+    return withTopLine(body);
+  }
+
+  // Puts your "always at the top" line first, moving it there if the template has it lower down.
+  function withTopLine(desc) {
+    const line = esc(String(settings.topLine || '').trim()).replace(/\r?\n/g, '<br>');
+    if (!line) return desc;
+    if (desc.startsWith(line)) return desc;
+    const rest = desc.split(line).join('').replace(/^(\s*<br>)+/, '').replace(/(<br>\s*)+$/, '').replace(/(<br>){3,}/g, '<br><br>');
+    return line + '<br><br>' + rest;
+  }
+  function topLineMissing(r) {
+    const line = esc(String(settings.topLine || '').trim()).replace(/\r?\n/g, '<br>');
+    if (!line) return false;
+    const raw = String(settings.descTemplate || '').replace(/\r?\n/g, '<br>');
+    return !raw.startsWith(line);
   }
 
   function photoUrls(r) {
@@ -914,12 +934,18 @@
   }
 
   function downloadCSV() {
+    openCheck('download');
+  }
+  function oldDownloadCSV() {
     if (!readyToExport()) return;
     saveFile(buildCSV(rows), exportName());
     toast(`Exported ${rows.length} card${rows.length === 1 ? '' : 's'}`);
   }
 
-  async function shareCSV() {
+  function shareCSV() {
+    openCheck('share');
+  }
+  async function oldShareCSV() {
     if (!readyToExport()) return;
     const file = new File([buildCSV(rows)], exportName(), { type: 'text/csv' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1018,7 +1044,7 @@
     const i = cardInfo(r);
     const sp = suggestedPrice(r);
     const el = document.createElement('article');
-    el.className = 'card-row' + (r.status === 'ok' ? '' : ' needs-check');
+    el.className = 'card-row' + (r.status === 'ok' ? '' : ' needs-check') + (selectMode && selected.has(r.id) ? ' selected' : '') + (r.ebayItemId ? ' is-listed' : '');
     el.dataset.id = r.id;
     el.hidden = rowHidden(r);
 
@@ -1075,7 +1101,11 @@
           : `<div class="empty-img">${c ? 'No picture in the database' : 'No match'}</div>`}
       </div>
       <div class="row-body">
+        ${r._listing ? '<p class="listing-now">Listing on eBay…</p>' : ''}
+        ${r.ebayItemId ? `<p class="listed">✓ Live on eBay · <a href="https://www.ebay.co.uk/itm/${esc(r.ebayItemId)}" target="_blank" rel="noopener">${esc(r.ebayItemId)}</a>${r.ebayWarnings ? `<br><span class="muted small">eBay notes: ${esc(r.ebayWarnings)}</span>` : ''}</p>` : ''}
+        ${r.ebayError && !r.ebayItemId ? `<p class="why-check">eBay didn't list it: ${esc(r.ebayError)}</p>` : ''}
         <div class="row-head">
+          ${selectMode ? `<label class="sel"><input type="checkbox" data-sel="${r.id}"${selected.has(r.id) ? ' checked' : ''} aria-label="Select"></label>` : ''}
           <div class="row-name">${esc(i.name || 'Unknown card')} <span class="muted">${esc(i.number)}</span></div>
           ${badge}
         </div>
@@ -1179,7 +1209,8 @@
   function chip(kind, n) {
     const on = filterKind === kind;
     if (!n && !on) return '';
-    return `<button class="chip warn${on ? ' on' : ''}" data-filter="${kind}" aria-pressed="${on}">${n} ${FILTERS[kind].label}</button>`;
+    const cls = kind === 'listed' ? 'good' : 'warn';
+    return `<button class="chip ${cls}${on ? ' on' : ''}" data-filter="${kind}" aria-pressed="${on}">${n} ${FILTERS[kind].label}</button>`;
   }
 
   function renderSummary() {
@@ -1195,12 +1226,15 @@
     const total = rows.reduce((s, r) => s + (parseFloat(priceStr(r.price)) || 0) * (parseInt(r.qty, 10) || 1), 0);
     el.innerHTML = `
       <span><strong>${rows.length}</strong> listing${rows.length === 1 ? '' : 's'} (${qty} cards)</span>
-      ${chip('check', toCheck)}${chip('noprice', noPrice)}${chip('noback', noBack)}${chip('nospecs', noSpecs)}
+      ${chip('check', toCheck)}${chip('noprice', noPrice)}${chip('noback', noBack)}${chip('nospecs', noSpecs)}${chip('ebayfail', rows.filter(FILTERS.ebayfail.test).length)}${chip('listed', rows.filter(FILTERS.listed.test).length)}
+      ${rows.some((r) => r.ebayItemId) ? '<button class="chip clear" data-tool="clearListed">Remove listed</button>' : ''}
       ${filterKind ? `<button class="chip clear" data-filter="">Show all ${rows.length}</button>` : ''}
       <span class="muted">${settings.exportMode === 'drafts' ? 'Exporting drafts' : 'Exporting live listings'}</span>
       <span class="muted small">${ruleSummary()}</span>
       <span>£${total.toFixed(2)}</span>
-      <label class="small"><input type="checkbox" id="onlyCheck"${onlyCheck ? ' checked' : ''}> Only to check</label>`;
+      <label class="small"><input type="checkbox" id="onlyCheck"${onlyCheck ? ' checked' : ''}> Only to check</label>
+      <div class="tools"><button class="btn small" data-tool="review">▶ Review cards</button>
+        <button class="btn small${selectMode ? ' primary' : ''}" data-tool="select">${selectMode ? 'Done selecting' : '☑ Select & bulk edit'}</button></div>`;
   }
 
   function rowFor(target) {
@@ -1514,13 +1548,573 @@
     });
   }
 
+  // ======================================================================
+  // Pre-upload check, bulk edit, quick review, list straight to eBay
+  // ======================================================================
+
+  const LS_EBAY = 'pokelister.ebay.v1';
+  let ebayConn = load(LS_EBAY, null);  // { token, connectedAt, expires } – sealed by the server
+  let ebayServer = false;               // server has the eBay developer keys
+  let ebayRunning = false;
+
+  function ebayReady() {
+    return !!(ebayServer && ebayConn && ebayConn.token && (!ebayConn.expires || ebayConn.expires > Date.now()));
+  }
+
+  function renderBottomBar() {
+    const on = ebayReady();
+    $('#ebayBtn').hidden = !on;
+    // with eBay connected the CSV buttons stay, but smaller
+    $('#exportBtn').classList.toggle('primary', !on);
+    $('#exportBtn').textContent = on ? 'CSV' : 'Download CSV';
+    $('#shareBtn').textContent = on ? 'Share' : 'Share CSV';
+  }
+
+  // ---------- one card as an eBay listing (same data as the live CSV) ----------
+
+  function listingFor(r) {
+    const names = specificColumns([r]);
+    const vals = specificValues(r, names);
+    const specifics = {};
+    names.forEach((n, i) => { if (vals[i]) specifics[n] = vals[i]; });
+    return {
+      sku: skuFor(r), title: String(r.title || '').slice(0, 80), description: buildDescription(r),
+      categoryId: settings.categoryId, price: priceStr(r.price), qty: parseInt(r.qty, 10) || 1,
+      cardCondition: CD_CONDITION[r.condition] || '400010', pictures: photoUrls(r), specifics,
+      bestOffer: !!settings.bestOffer, location: settings.location || settings.postcode, postcode: settings.postcode,
+      shippingPolicy: settings.shippingPolicy, returnPolicy: settings.returnPolicy, paymentPolicy: settings.paymentPolicy,
+    };
+  }
+
+  // ---------- pre-upload check ----------
+
+  const CHECK_LABELS = {
+    busy: 'photo still processing',
+    noprice: 'no price',
+    nophoto: 'front photo not uploaded',
+    listed: 'already live on eBay',
+    check: 'still marked to check',
+    noback: 'no back photo',
+    nospecs: 'item specifics missing',
+  };
+
+  // Fixes what can be fixed safely, then sorts the cards into ready / left out.
+  function runCheck(mode) {
+    const live = mode === 'ebay' || settings.exportMode !== 'drafts';
+    const fixed = [];
+    const passed = [];
+    let n;
+
+    // titles: rebuild empty ones, tidy spaces, keep within 80 characters
+    n = 0;
+    for (const r of rows) {
+      let t = String(r.title || '').replace(/\s+/g, ' ').trim();
+      if (!t) t = buildTitle(r);
+      if (t.length > 80) t = t.slice(0, 80).trim();
+      if (t !== r.title) { r.title = t; n++; }
+    }
+    if (n) fixed.push(`Tidied ${n} title${n === 1 ? '' : 's'} (spaces, empty or over 80 characters)`);
+    else passed.push('Every title is 80 characters or less');
+
+    // prices: never below your minimum
+    const min = Number(settings.minPrice) || 0;
+    n = 0;
+    if (min > 0) {
+      for (const r of rows) {
+        const p = parseFloat(priceStr(r.price));
+        if (p && p < min) { r.price = min.toFixed(2); r.priceAuto = false; n++; }
+      }
+    }
+    if (n) fixed.push(`Raised ${n} price${n === 1 ? '' : 's'} to your £${min.toFixed(2)} minimum`);
+
+    // postage line
+    if (String(settings.topLine || '').trim()) {
+      if (topLineMissing()) fixed.push('Put your postage line at the top of every description');
+      else passed.push('Postage line is at the top of every description');
+    }
+
+    // item specifics over 65 characters get cut on export
+    n = rows.filter((r) => Object.values(getSpecifics(r)).some((v) => String(v || '').trim().length > 65)
+      || Object.values(parseExtraSpecifics(r.extraSpecifics)).some((v) => String(v).trim().length > 65)).length;
+    if (n) fixed.push(`Shortened item specifics on ${n} card${n === 1 ? '' : 's'} to eBay's 65 characters`);
+    else passed.push('Every item specific is 65 characters or less');
+
+    const missingSettings = [];
+    if (live) {
+      if (!String(settings.shippingPolicy).trim()) missingSettings.push('postage policy name');
+      if (!String(settings.returnPolicy).trim()) missingSettings.push('returns policy name');
+      if (!String(settings.postcode).trim()) missingSettings.push('postcode');
+      if (!missingSettings.length) passed.push(`Postage policy: "${settings.shippingPolicy}"`);
+    }
+
+    const busyJobs = jobs.filter((j) => j.status === 'queued' || j.status === 'working').length;
+    const ready = [];
+    const blocked = {};
+    const warn = {};
+    const add = (obj, k, r) => { (obj[k] = obj[k] || []).push(r); };
+    for (const r of rows) {
+      const why = [];
+      if (r.ebayItemId) why.push('listed');
+      if (r._uploading || r._listing) why.push('busy');
+      if (live && !priceStr(r.price)) why.push('noprice');
+      if (live && photoHost && !r.frontUrl) why.push('nophoto');
+      if (why.length) { add(blocked, why[0], r); continue; }
+      ready.push(r);
+      if (r.status !== 'ok') add(warn, 'check', r);
+      if (settings.pairsMode && (photoHost ? !r.backUrl : !r.backPhoto)) add(warn, 'noback', r);
+      if (missingSpecifics(r).length) add(warn, 'nospecs', r);
+    }
+    if (photoHost && !blocked.nophoto && !warn.noback) passed.push('Every card has its front and back photo');
+    saveRows();
+    renderList();
+    return { mode, live, fixed, passed, missingSettings, ready, blocked, warn, busyJobs };
+  }
+
+  let lastCheck = null;
+
+  function openCheck(mode) {
+    if (!rows.length) { toast('No cards yet'); return; }
+    lastCheck = runCheck(mode);
+    renderCheck();
+    openSheet('checkSheet');
+  }
+
+  function renderCheck() {
+    const c = lastCheck;
+    const verb = c.mode === 'ebay' ? 'List' : c.mode === 'share' ? 'Share' : 'Download';
+    const what = c.mode === 'ebay' ? 'live on eBay now' : c.live ? 'as live listings' : 'as drafts';
+    const showBtn = (k, list) => (FILTERS[k] ? `<button class="btn small" data-check-show="${k}">Show ${list.length}</button>` : '');
+    const line = (k, list) => `<li><span>${list.length} ${esc(CHECK_LABELS[k])}</span>${showBtn(k, list)}</li>`;
+    const blockedKeys = Object.keys(c.blocked);
+    const warnKeys = Object.keys(c.warn);
+    const left = blockedKeys.reduce((n, k) => n + c.blocked[k].length, 0);
+    let html = '';
+    if (c.fixed.length) html += `<h3>Fixed for you</h3><ul class="check-list ok">${c.fixed.map((f) => `<li><span>✓ ${esc(f)}</span></li>`).join('')}</ul>`;
+    if (c.passed.length) html += `<h3>All good</h3><ul class="check-list ok">${c.passed.map((f) => `<li><span>✓ ${esc(f)}</span></li>`).join('')}</ul>`;
+    if (c.busyJobs) html += `<p class="warn-text">${c.busyJobs} photo${c.busyJobs === 1 ? ' is' : 's are'} still being read – wait for them to finish if they're part of this upload.</p>`;
+    if (c.missingSettings.length) {
+      html += `<h3>Needed first</h3><p class="warn-text">Add your ${esc(c.missingSettings.join(', '))} in Settings.</p>
+        <div class="sheet-actions"><button class="btn primary" data-check-settings>Open Settings</button></div>`;
+      $('#checkBody').innerHTML = html;
+      return;
+    }
+    if (blockedKeys.length) html += `<h3>Left out of this upload (${left})</h3><ul class="check-list bad">${blockedKeys.map((k) => line(k, c.blocked[k])).join('')}</ul>`;
+    if (warnKeys.length) html += `<h3>Worth a look (still included)</h3><ul class="check-list warn">${warnKeys.map((k) => line(k, c.warn[k])).join('')}</ul>`;
+    const n = c.ready.length;
+    html += n
+      ? `<div class="sheet-actions">
+          ${c.mode === 'ebay' ? '<button class="btn" data-check-test>Test 1 card first</button>' : ''}
+          <button class="btn primary" data-check-go>${verb} ${n} card${n === 1 ? '' : 's'}</button>
+        </div>
+        <p class="help">${n} card${n === 1 ? '' : 's'} will go ${what}.${c.mode === 'ebay' ? ' "Test 1 card first" asks eBay to check the first card without listing it.' : ''}</p>
+        <div id="checkTest" class="help"></div>`
+      : '<p class="warn-text">No cards are ready yet.</p>';
+    $('#checkBody').innerHTML = html;
+  }
+
+  async function checkGo() {
+    const c = lastCheck;
+    if (!c || !c.ready.length) return;
+    closeSheet('checkSheet');
+    if (c.mode === 'download') {
+      saveFile(buildCSV(c.ready), exportName());
+      toast(`Exported ${c.ready.length} card${c.ready.length === 1 ? '' : 's'}`);
+    } else if (c.mode === 'share') {
+      const file = new File([buildCSV(c.ready)], exportName(), { type: 'text/csv' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: 'eBay listings' }); } catch (e) { if (e.name !== 'AbortError') toast(e.message); }
+      } else {
+        toast('Sharing files is not supported here — use Download');
+      }
+    } else if (c.mode === 'ebay') {
+      listOnEbay(c.ready);
+    }
+  }
+
+  // ---------- list straight to eBay ----------
+
+  async function ebayCall(r, verify) {
+    return api('/api/ebay/list', { method: 'POST', body: JSON.stringify({ token: ebayConn && ebayConn.token, listing: listingFor(r), verify: !!verify }) });
+  }
+  const ebayMsg = (res) => (res.errors || []).map((e) => e.message).filter(Boolean).join(' ') || 'eBay didn\'t accept it';
+
+  async function testOnEbay() {
+    const r = lastCheck && lastCheck.ready[0];
+    const box = $('#checkTest');
+    if (!r || !box) return;
+    box.textContent = `Asking eBay to check "${r.title}"…`;
+    try {
+      const res = await ebayCall(r, true);
+      if (res.ok) {
+        const fees = (res.fees || []).reduce((s, f) => s + f.amount, 0);
+        box.innerHTML = `<span class="ok-text">✓ eBay accepted "${esc(r.title)}" (not listed). Listing fees: £${fees.toFixed(2)}.</span>`
+          + ((res.warnings || []).length ? `<br>eBay notes: ${esc(res.warnings.map((w) => w.message).join(' '))}` : '');
+      } else {
+        box.innerHTML = `<span class="warn-text">eBay wouldn't accept it: ${esc(ebayMsg(res))}</span>`;
+      }
+    } catch (e) {
+      box.innerHTML = `<span class="warn-text">${esc(e.message)}</span>`;
+    }
+  }
+
+  async function listOnEbay(list) {
+    if (ebayRunning) { toast('Already listing – wait for it to finish'); return; }
+    if (!confirm(`List ${list.length} card${list.length === 1 ? '' : 's'} LIVE on eBay now?`)) return;
+    ebayRunning = true;
+    let done = 0, okN = 0, failN = 0;
+    for (const r of list) { r._listing = true; r.ebayError = ''; }
+    renderList();
+    const queue = [...list];
+    const worker = async () => {
+      while (queue.length) {
+        const r = queue.shift();
+        try {
+          const res = await ebayCall(r, false);
+          if (res.ok && res.itemId) {
+            r.ebayItemId = res.itemId;
+            r.listedAt = Date.now();
+            r.ebayWarnings = (res.warnings || []).map((w) => w.message).join(' ');
+            okN++;
+          } else {
+            r.ebayError = ebayMsg(res);
+            failN++;
+          }
+        } catch (e) {
+          r.ebayError = e.message;
+          failN++;
+        }
+        r._listing = false;
+        done++;
+        toast(`Listing on eBay… ${done} of ${list.length}`);
+        rerenderRow(r);
+        saveRows();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    ebayRunning = false;
+    renderList();
+    toast(failN ? `${okN} listed, ${failN} failed – tap "${failN} eBay errors" to see why` : `All ${okN} listed on eBay ✓`);
+  }
+
+  async function connectEbay() {
+    try {
+      const { url } = await api('/api/ebay/connect-url');
+      location.href = url;
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  async function checkPolicies() {
+    const out = $('#ebayPolicyResult');
+    out.textContent = 'Asking eBay for your policies…';
+    try {
+      const { policies } = await api('/api/ebay/policies', { method: 'POST', body: JSON.stringify({ token: ebayConn.token }) });
+      const part = (label, list, want) => {
+        if (!list) return `${label}: couldn't read them`;
+        const hit = want && list.some((p) => p.name.trim().toLowerCase() === want.trim().toLowerCase());
+        return `${label}: ${list.map((p) => p.name).join(', ') || 'none'}${want ? (hit ? ` – "${want}" ✓` : ` – "${want}" NOT FOUND`) : ''}`;
+      };
+      out.innerHTML = [part('Postage', policies.shipping, settings.shippingPolicy), part('Returns', policies.returns, settings.returnPolicy),
+        part('Payment', policies.payment, settings.paymentPolicy)].map(esc).join('<br>');
+    } catch (e) {
+      out.textContent = e.message;
+    }
+  }
+
+  function renderEbaySettings() {
+    const st = $('#ebayStatus');
+    if (!ebayServer) st.textContent = 'Not set up on the server yet (EBAY_CLIENT_ID, EBAY_CLIENT_SECRET, EBAY_RUNAME on Render).';
+    else if (ebayReady()) st.textContent = `Connected on this device since ${new Date(ebayConn.connectedAt).toLocaleDateString('en-GB')}.`;
+    else st.textContent = 'Not connected on this device.';
+    $('#ebayConnect').hidden = !ebayServer || ebayReady();
+    $('#ebayCheckPolicies').hidden = !ebayReady();
+    $('#ebayDisconnect').hidden = !ebayConn;
+  }
+
+  // ---------- sheets ----------
+
+  function openSheet(id) {
+    $('#' + id).hidden = false;
+    document.body.classList.add('sheet-open');
+  }
+  function closeSheet(id) {
+    $('#' + id).hidden = true;
+    if (![...document.querySelectorAll('.sheet, .review')].some((el) => !el.hidden)) document.body.classList.remove('sheet-open');
+  }
+
+  // ---------- bulk edit ----------
+
+  let selectMode = false;
+  const selected = new Set();
+
+  function setSelectMode(on) {
+    selectMode = on;
+    if (!on) selected.clear();
+    $('#bulkBar').hidden = !on;
+    $('#mainBar').hidden = on;
+    renderList();
+    renderBulkCount();
+  }
+  function renderBulkCount() {
+    $('#bulkCount').textContent = `${selected.size} selected`;
+    $('#bulkEdit').disabled = !selected.size;
+  }
+  function selectedRows() {
+    return rows.filter((r) => selected.has(r.id));
+  }
+
+  function openBulk() {
+    const n = selected.size;
+    if (!n) return;
+    $('#bulkTitle').textContent = `Edit ${n} card${n === 1 ? '' : 's'}`;
+    const keep = '<option value="">No change</option>';
+    $('#b_condition').innerHTML = keep + CONDITIONS.map((c) => `<option>${esc(c)}</option>`).join('');
+    $('#b_finish').innerHTML = keep + FINISHES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('');
+    $('#b_language').innerHTML = keep + LANGUAGES.map((l) => `<option>${esc(l)}</option>`).join('');
+    $('#b_priceMode').value = '';
+    $('#b_price').value = '';
+    $('#b_qty').value = '';
+    $('#b_ok').checked = false;
+    openSheet('bulkSheet');
+  }
+
+  async function applyBulk() {
+    const list = selectedRows();
+    const cond = $('#b_condition').value;
+    const finish = $('#b_finish').value;
+    const lang = $('#b_language').value;
+    const priceMode = $('#b_priceMode').value;
+    const price = parseFloat(String($('#b_price').value).replace(',', '.'));
+    const qty = parseInt($('#b_qty').value, 10);
+    if (priceMode === 'set' && !(price > 0)) { toast('Type the price to set'); return; }
+    const rematchList = [];
+    for (const r of list) {
+      if (cond) r.condition = cond;
+      if (finish) {
+        r.finish = finish;
+        if (r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 && !r.pulse.userPicked) {
+          usePulseVersion(r, rankPulseVersions(r.pulse.versions, r.finish, r.stamp)[0], false);
+        }
+      }
+      if (qty > 0) r.qty = qty;
+      if (lang && lang !== ((r.detected && r.detected.language) || 'English')) {
+        r.detected = { ...(r.detected || {}), language: lang };
+        if (/^english$/i.test(lang)) r.detected.name_printed = '';
+        rematchList.push(r);
+      }
+      if (priceMode === 'set') { r.price = price.toFixed(2); r.priceAuto = false; }
+      if (priceMode === 'rule') { const s = suggestedPrice(r); if (s) { r.price = s.gbp.toFixed(2); r.priceAuto = true; } }
+      if (priceMode === 'min') {
+        const min = Number(settings.minPrice) || 0;
+        const p = parseFloat(priceStr(r.price));
+        if (min && (!p || p < min)) { r.price = min.toFixed(2); r.priceAuto = false; }
+      }
+      if ($('#b_ok').checked) r.status = 'ok';
+      refreshDerived(r);
+    }
+    saveRows();
+    closeSheet('bulkSheet');
+    renderList();
+    toast(`Updated ${list.length} card${list.length === 1 ? '' : 's'}`);
+    for (const r of rematchList) await rematch(r); // one at a time, to go easy on Pulse
+  }
+
+  function removeBulk() {
+    const list = selectedRows();
+    if (!list.length || !confirm(`Remove ${list.length} card${list.length === 1 ? '' : 's'} from PokeLister?`)) return;
+    rows = rows.filter((r) => !selected.has(r.id));
+    selected.clear();
+    saveRows();
+    closeSheet('bulkSheet');
+    renderList();
+    renderBulkCount();
+  }
+
+  // ---------- quick review ----------
+
+  let review = { ids: [], i: 0 };
+
+  function openReview() {
+    // the cards shown right now (so tap "4 to check" first to review just those)
+    const ids = rows.filter((r) => !rowHidden(r)).map((r) => r.id);
+    if (!ids.length) { toast('No cards to review'); return; }
+    const firstCheck = rows.findIndex((r) => ids.includes(r.id) && r.status !== 'ok');
+    review = { ids, i: Math.max(0, ids.indexOf(firstCheck >= 0 ? rows[firstCheck].id : ids[0])) };
+    $('#review').hidden = false;
+    document.body.classList.add('sheet-open');
+    renderReview();
+  }
+  function closeReview() {
+    $('#review').hidden = true;
+    if (![...document.querySelectorAll('.sheet')].some((el) => !el.hidden)) document.body.classList.remove('sheet-open');
+    renderList();
+  }
+  function reviewRow() {
+    return rows.find((r) => r.id === review.ids[review.i]);
+  }
+
+  function renderReview() {
+    review.ids = review.ids.filter((id) => rows.some((r) => r.id === id));
+    if (!review.ids.length) { closeReview(); return; }
+    review.i = Math.min(Math.max(0, review.i), review.ids.length - 1);
+    const r = reviewRow();
+    const c = chosen(r);
+    const i = cardInfo(r);
+    const sp = suggestedPrice(r);
+    const big = r.frontUrl || r.photo;
+    const checked = review.ids.filter((id) => (rows.find((x) => x.id === id) || {}).status === 'ok').length;
+    $('#rvPos').textContent = `${review.i + 1} of ${review.ids.length} · ${checked} OK`;
+    const condOpts = CONDITIONS.map((x) => `<option${x === r.condition ? ' selected' : ''}>${esc(x)}</option>`).join('');
+    const finishOpts = FINISHES.map(([v, l]) => `<option value="${v}"${v === r.finish ? ' selected' : ''}>${esc(l)}</option>`).join('');
+    $('#rvBody').innerHTML = `
+      <div class="rv-photos">
+        ${big ? `<img class="rv-main" src="${esc(big)}" alt="Front">` : '<div class="rv-main empty-img">No photo</div>'}
+        <div class="rv-side">
+          ${r.backPhoto ? `<img src="${r.backPhoto}" alt="Back"><span>Back</span>` : '<div class="empty-img">No back</div>'}
+          ${c && c.image ? `<img src="${esc(c.image)}" alt="Database match"><span>Match</span>` : '<div class="empty-img">No match picture</div>'}
+        </div>
+      </div>
+      <div class="rv-head">
+        <strong>${esc(i.name || 'Unknown card')}</strong> <span class="muted">${esc(i.number)}</span>
+        <span class="badge ${r.status === 'ok' ? 'ok' : 'warn'}">${r.status === 'ok' ? '✓ OK' : r.status === 'nomatch' ? 'No match' : 'Check'}</span>
+      </div>
+      <div class="muted small">${esc([i.set, i.rarity, i.language].filter(Boolean).join(' · '))}</div>
+      ${r.status !== 'ok' && r.reasons && r.reasons.length ? `<p class="why-check">Why check: ${r.reasons.map(esc).join('; ')}.</p>` : ''}
+      ${r.ebayItemId ? `<p class="listed">✓ Live on eBay · ${esc(r.ebayItemId)}</p>` : ''}
+      ${r.ebayError && !r.ebayItemId ? `<p class="why-check">eBay didn't list it: ${esc(r.ebayError)}</p>` : ''}
+      <label class="field"><span>Title <em class="count">${r.title.length}/80</em></span>
+        <textarea data-rv="title" maxlength="80" rows="2">${esc(r.title)}</textarea></label>
+      <div class="field-row">
+        <label class="field"><span>Price £</span><input data-rv="price" inputmode="decimal" value="${esc(r.price)}" placeholder="0.00"></label>
+        <label class="field"><span>Condition</span><select data-rv="condition">${condOpts}</select></label>
+      </div>
+      <p class="muted small">${sp ? esc(sp.source === 'pulse'
+        ? `Rule: Pulse £${Number(sp.base).toFixed(2)} – ${Number(settings.pulseDiscount) || 0}% = £${sp.gbp.toFixed(2)}${sp.raisedToMin ? ' (your minimum)' : ''}`
+        : `Rule price: £${sp.gbp.toFixed(2)}`) : 'No Pulse price – type one in.'}</p>
+      <label class="field"><span>Finish</span><select data-rv="finish">${finishOpts}</select></label>`;
+    $('#rvPrev').disabled = review.i === 0;
+  }
+
+  function reviewMove(step) {
+    review.i += step;
+    if (review.i >= review.ids.length) {
+      toast('That was the last card');
+      closeReview();
+      return;
+    }
+    renderReview();
+    $('#rvBody').scrollTop = 0;
+  }
+
+  // ---------- wiring ----------
+
+  function bindTools() {
+    $('#ebayBtn').addEventListener('click', () => openCheck('ebay'));
+    document.addEventListener('click', (e) => {
+      const close = e.target.closest('[data-close]');
+      if (close) closeSheet(close.dataset.close);
+    });
+    $('#checkSheet').addEventListener('click', (e) => {
+      const show = e.target.closest('[data-check-show]');
+      if (show) { closeSheet('checkSheet'); if (filterKind !== show.dataset.checkShow) setFilter(show.dataset.checkShow); return; }
+      if (e.target.closest('[data-check-settings]')) { closeSheet('checkSheet'); openSettings(); return; }
+      if (e.target.closest('[data-check-test]')) { testOnEbay(); return; }
+      if (e.target.closest('[data-check-go]')) checkGo();
+    });
+
+    $('#summary').addEventListener('click', (e) => {
+      const t = e.target.closest('[data-tool]');
+      if (!t) return;
+      if (t.dataset.tool === 'review') openReview();
+      if (t.dataset.tool === 'select') setSelectMode(!selectMode);
+      if (t.dataset.tool === 'clearListed') {
+        const n = rows.filter((r) => r.ebayItemId).length;
+        if (!n || !confirm(`Remove the ${n} card${n === 1 ? '' : 's'} already live on eBay from PokeLister?`)) return;
+        rows = rows.filter((r) => !r.ebayItemId);
+        if (filterKind === 'listed') filterKind = '';
+        saveRows();
+        renderList();
+      }
+    });
+
+    $('#list').addEventListener('change', (e) => {
+      const id = e.target.dataset && e.target.dataset.sel;
+      if (!id) return;
+      if (e.target.checked) selected.add(id); else selected.delete(id);
+      e.target.closest('.card-row').classList.toggle('selected', e.target.checked);
+      renderBulkCount();
+    });
+    $('#bulkAll').addEventListener('click', () => {
+      for (const r of rows) if (!rowHidden(r)) selected.add(r.id);
+      renderList();
+      renderBulkCount();
+    });
+    $('#bulkNone').addEventListener('click', () => { selected.clear(); renderList(); renderBulkCount(); });
+    $('#bulkDone').addEventListener('click', () => setSelectMode(false));
+    $('#bulkEdit').addEventListener('click', openBulk);
+    $('#bulkApply').addEventListener('click', applyBulk);
+    $('#bulkRemove').addEventListener('click', removeBulk);
+
+    $('#rvClose').addEventListener('click', closeReview);
+    $('#rvPrev').addEventListener('click', () => reviewMove(-1));
+    $('#rvSkip').addEventListener('click', () => reviewMove(1));
+    $('#rvGood').addEventListener('click', () => {
+      const r = reviewRow();
+      if (r) { r.status = 'ok'; saveRows(); }
+      reviewMove(1);
+    });
+    $('#rvEdit').addEventListener('click', () => {
+      const r = reviewRow();
+      closeReview();
+      const el = r && document.querySelector(`.card-row[data-id="${r.id}"]`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+    $('#rvBody').addEventListener('change', (e) => {
+      const f = e.target.dataset.rv;
+      const r = reviewRow();
+      if (!f || !r) return;
+      if (f === 'title') { r.title = e.target.value.slice(0, 80); r.titleEdited = true; }
+      if (f === 'price') { r.price = priceStr(e.target.value) || e.target.value.trim(); r.priceAuto = false; }
+      if (f === 'condition') r.condition = e.target.value;
+      if (f === 'finish') {
+        r.finish = e.target.value;
+        if (r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 && !r.pulse.userPicked) {
+          usePulseVersion(r, rankPulseVersions(r.pulse.versions, r.finish, r.stamp)[0], false);
+        }
+        refreshDerived(r);
+        renderReview();
+      }
+      saveRows();
+    });
+
+    $('#ebayConnect').addEventListener('click', connectEbay);
+    $('#ebayCheckPolicies').addEventListener('click', checkPolicies);
+    $('#ebayDisconnect').addEventListener('click', () => {
+      if (!confirm('Disconnect eBay on this device?')) return;
+      ebayConn = null;
+      try { localStorage.removeItem(LS_EBAY); } catch (e) { /* ignore */ }
+      renderEbaySettings();
+      renderBottomBar();
+    });
+
+    // back from eBay's sign-in page
+    if (/[?&]ebay=connected/.test(location.search)) {
+      ebayConn = load(LS_EBAY, null);
+      history.replaceState(null, '', location.pathname);
+      setTimeout(() => toast('eBay connected ✓ – "List on eBay" is at the bottom'), 300);
+    }
+    renderBottomBar();
+  }
+
+
   // ---------- settings ----------
 
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
     'defaultCondition', 'includeStockPhoto', 'autoPrice', 'priceSource', 'pulseDiscount',
     'eurToGbp', 'priceMultiplier', 'minPrice', 'descTemplate',
     'shippingPolicy', 'returnPolicy', 'paymentPolicy', 'postcode', 'location', 'bestOffer', 'photoBoost', 'autoLevels', 'photoContext',
-    'specGame', 'specManufacturer'];
+    'specGame', 'specManufacturer', 'topLine'];
 
   function openSettings() {
     $('#s_defaultCondition').innerHTML = CONDITIONS.map((c) => `<option>${esc(c)}</option>`).join('');
@@ -1532,6 +2126,8 @@
     $('#settings').hidden = false;
     document.body.classList.add('sheet-open');
     $('#ruleReminder').innerHTML = ruleSummary();
+    renderEbaySettings();
+    $('#ebayPolicyResult').textContent = '';
     checkServer();
   }
 
@@ -1554,7 +2150,7 @@
     settings.photoBoost = Math.min(30, Math.max(0, numOr(settings.photoBoost, 8)));
     settings.categoryId = String(settings.categoryId).trim() || DEFAULT_SETTINGS.categoryId;
     if (!String(settings.descTemplate).trim()) settings.descTemplate = DEFAULT_DESC;
-    for (const k of ['shippingPolicy', 'returnPolicy', 'paymentPolicy', 'location', 'specGame', 'specManufacturer']) {
+    for (const k of ['shippingPolicy', 'returnPolicy', 'paymentPolicy', 'location', 'specGame', 'specManufacturer', 'topLine']) {
       settings[k] = String(settings[k] || '').trim();
     }
     settings.postcode = String(settings.postcode || '').trim().toUpperCase();
@@ -1578,6 +2174,9 @@
     photoHost = !!h.photoHostSet;
     pulseOn = !!h.pulseSet;
     $('#photoHostWarn').hidden = photoHost;
+    ebayServer = !!h.ebaySet;
+    renderBottomBar();
+    renderEbaySettings();
     renderList();
   }
 
@@ -1614,6 +2213,7 @@
   // ---------- start ----------
 
   bindEvents();
+  bindTools();
   renderList();
   renderNextHint();
   // Cards priced before the switch to Pulse's market price get re-checked once.
