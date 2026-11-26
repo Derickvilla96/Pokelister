@@ -130,10 +130,44 @@ async function mapLimit(items, limit, fn) {
 const str = (v) => (v == null ? '' : String(v)).trim().slice(0, 300);
 const num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
 
+// The AI sometimes adds a second object or a note after its answer, so read just the
+// first complete JSON object (matching braces, ignoring braces inside strings).
+function firstJSONObject(t, from) {
+  const start = t.indexOf('{', from);
+  if (start < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < t.length; i++) {
+    const ch = t[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === '\\') esc = true;
+      else if (ch === '"') inStr = false;
+    } else if (ch === '"') inStr = true;
+    else if (ch === '{') depth++;
+    else if (ch === '}' && --depth === 0) return { text: t.slice(start, i + 1), start };
+  }
+  return { text: t.slice(start), start }; // cut off: let the caller try to repair it
+}
+
 function parseLooseJSON(text) {
-  const m = String(text).match(/\{[\s\S]*\}/);
-  if (!m) throw new Error('Could not read the AI response');
-  return JSON.parse(m[0]);
+  const t = String(text).replace(/```(?:json)?/gi, '');
+  let from = 0;
+  let fallback = null;
+  for (let tries = 0; tries < 20; tries++) {
+    const obj = firstJSONObject(t, from);
+    if (!obj) break;
+    for (const candidate of [obj.text, obj.text.replace(/,\s*([}\]])/g, '$1')]) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && (Array.isArray(parsed.cards) || parsed.card_back === true)) return parsed;
+        if (!fallback) fallback = parsed;
+        break;
+      } catch { /* try the next one */ }
+    }
+    from = obj.start + 1;
+  }
+  if (fallback) return fallback;
+  throw new Error('Could not read the AI response – tap to retry');
 }
 
 // ---------- step 1: read the cards in the photo ----------
