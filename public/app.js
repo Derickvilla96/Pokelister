@@ -108,6 +108,27 @@
   let rows = load(LS_ROWS, []);
   try { localStorage.removeItem('pokelister.live.v1'); } catch (e) { /* old 'Already on eBay' report, feature removed */ }
   let onlyCheck = false;
+  // Tap "4 no price" etc. to show just those cards. Cards stay shown while you fix them,
+  // until you tap the filter again or "Show all".
+  let filterKind = '';
+  let filterIds = new Set();
+  const FILTERS = {
+    check: { label: 'to check', test: (r) => r.status !== 'ok' },
+    noprice: { label: 'no price', test: (r) => !priceStr(r.price) },
+    noback: { label: 'no back', test: (r) => !r.backPhoto },
+    nospecs: { label: 'specifics missing', test: (r) => missingSpecifics(r).length > 0 },
+  };
+  function setFilter(kind) {
+    filterKind = kind && kind !== filterKind ? kind : '';
+    filterIds = new Set(filterKind ? rows.filter(FILTERS[filterKind].test).map((r) => r.id) : []);
+    onlyCheck = filterKind === 'check';
+    renderList();
+    window.scrollTo({ top: Math.max(0, $('#summary').getBoundingClientRect().top + window.scrollY - 70), behavior: 'smooth' });
+  }
+  function rowHidden(r) {
+    if (filterKind) return !filterIds.has(r.id);
+    return onlyCheck && r.status === 'ok';
+  }
   let photoHost = true;          // updated from /api/health
   let pulseOn = true;            // updated from /api/health
   let nextRole = 'front';        // in front & back mode: what the next photo is
@@ -999,7 +1020,7 @@
     const el = document.createElement('article');
     el.className = 'card-row' + (r.status === 'ok' ? '' : ' needs-check');
     el.dataset.id = r.id;
-    el.hidden = onlyCheck && r.status === 'ok';
+    el.hidden = rowHidden(r);
 
     const options = r.candidates.map((x, idx) =>
       `<option value="${idx}"${idx === r.chosen ? ' selected' : ''}>${esc(candidateLabel(x))}</option>`).join('');
@@ -1122,6 +1143,7 @@
     rerenderRow(r);
     try {
       const m = await api('/api/match', { method: 'POST', body: JSON.stringify({ detected: r.detected }) });
+      if (m.detected && m.detected.name) r.detected = { ...r.detected, name: m.detected.name }; // spelling fixed by the server
       r.candidates = m.candidates || [];
       r.chosen = r.candidates.length ? 0 : -1;
       r.status = m.status || (r.chosen >= 0 ? 'check' : 'nomatch');
@@ -1154,6 +1176,12 @@
     renderSummary();
   }
 
+  function chip(kind, n) {
+    const on = filterKind === kind;
+    if (!n && !on) return '';
+    return `<button class="chip warn${on ? ' on' : ''}" data-filter="${kind}" aria-pressed="${on}">${n} ${FILTERS[kind].label}</button>`;
+  }
+
   function renderSummary() {
     const el = $('#summary');
     $('#empty').hidden = rows.length > 0;
@@ -1167,10 +1195,8 @@
     const total = rows.reduce((s, r) => s + (parseFloat(priceStr(r.price)) || 0) * (parseInt(r.qty, 10) || 1), 0);
     el.innerHTML = `
       <span><strong>${rows.length}</strong> listing${rows.length === 1 ? '' : 's'} (${qty} cards)</span>
-      ${toCheck ? `<span class="warn">${toCheck} to check</span>` : ''}
-      ${noPrice ? `<span class="warn">${noPrice} no price</span>` : ''}
-      ${noBack ? `<span class="warn">${noBack} no back</span>` : ''}
-      ${noSpecs ? `<span class="warn">${noSpecs} specifics missing</span>` : ''}
+      ${chip('check', toCheck)}${chip('noprice', noPrice)}${chip('noback', noBack)}${chip('nospecs', noSpecs)}
+      ${filterKind ? `<button class="chip clear" data-filter="">Show all ${rows.length}</button>` : ''}
       <span class="muted">${settings.exportMode === 'drafts' ? 'Exporting drafts' : 'Exporting live listings'}</span>
       <span class="muted small">${ruleSummary()}</span>
       <span>£${total.toFixed(2)}</span>
@@ -1228,8 +1254,13 @@
 
     $('#summary').addEventListener('change', (e) => {
       if (e.target.id !== 'onlyCheck') return;
+      filterKind = '';
       onlyCheck = e.target.checked;
       renderList();
+    });
+    $('#summary').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-filter]');
+      if (b) setFilter(b.dataset.filter);
     });
 
     const list = $('#list');
