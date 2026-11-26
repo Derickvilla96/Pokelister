@@ -601,7 +601,8 @@
       if (p.tried && p.tried.length) {
         const looked = p.tried.map((t) => `"${t.search}" (${t.results} result${t.results === 1 ? '' : 's'}`
           + (t.foreignSkipped ? `, ${t.foreignSkipped} foreign skipped` : '')
-          + (t.sample && t.sample.length ? ': ' + t.sample.join(', ') : '') + ')').join('; ');
+          + (t.sample && t.sample.length ? ': ' + t.sample.join(', ') : '')
+          + (t.skippedSample && t.skippedSample.length ? `; other language skipped: ${t.skippedSample.join(', ')}` : '') + ')').join('; ');
         const wanted = [p.wanted && p.wanted.number, p.wanted && p.wanted.set].filter(Boolean).join(', ');
         why = ` Searched ${looked}${wanted ? `; needed ${wanted}` : ''}.`;
       }
