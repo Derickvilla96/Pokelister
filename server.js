@@ -50,8 +50,8 @@ Read the text printed on the card itself rather than guessing from the artwork. 
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {"cards":[{
-  "name": "the card's official ENGLISH name, including suffixes like ex, V, VMAX, VSTAR, GX, EX. For a Japanese, Chinese, Korean or other non-English card, give the English name of the same card (e.g. ルンパッパ -> Ludicolo, メガゲンガーex -> Mega Gengar ex, 皮卡丘 -> Pikachu)",
   "name_printed": "the name exactly as printed on the card, in its own script (e.g. ルンパッパ). Empty string if the card is in English",
+  "name": "the card's official ENGLISH name, including suffixes like ex, V, VMAX, VSTAR, GX, EX. For a Japanese, Chinese, Korean or other non-English card, translate name_printed itself – the Pokémon actually named on the card, not an evolution of it (e.g. ルンパッパ -> Ludicolo, ドラメシヤ -> Dreepy, ドロンチ -> Drakloak, メガゲンガーex -> Mega Gengar ex, 皮卡丘 -> Pikachu)",
   "number": "collector number before the slash, exactly as printed (keep leading zeros)",
   "set_total": "number after the slash, or empty string if there is none",
   "set_name": "your best guess at the set name in English only (for Japanese/Chinese sets use the usual English name, e.g. 'Mega Dream ex', 'Terastal Festival ex', 'Gem Pack Vol. 3'). No language words, no codes in brackets. Empty string if unsure",
@@ -601,8 +601,88 @@ async function correctEnglishName(name) {
   return n;
 }
 
+// ---------- Pokémon names in every language (PokeAPI's free list) ----------
+// The AI sometimes translates a Japanese/Chinese name into the wrong Pokémon (ドラメシヤ is
+// Dreepy, not Drakloak). This list says which Pokémon the printed name really is.
+const SPECIES_CSV = 'https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv/pokemon_species_names.csv';
+const SPECIES_LANGS = { 1: 'ja', 11: 'ja', 3: 'ko', 4: 'zh', 12: 'zh' }; // PokeAPI language ids
+let species = null;          // { local: [[name, english]...] longest first, english: Set }
+let speciesTried = 0;
+
+function parseCsvLine(line) {
+  const out = []; let cur = ''; let q = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (q) { if (ch === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (ch === '"') q = false; else cur += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === ',') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function buildSpecies(csv) {
+  const en = new Map(); const local = [];
+  const lines = String(csv).split(/\r?\n/).slice(1);
+  for (const line of lines) {
+    const [id, lang, name] = parseCsvLine(line);
+    if (lang === '9' && name) en.set(id, name);
+  }
+  for (const line of lines) {
+    const [id, lang, name] = parseCsvLine(line);
+    if (SPECIES_LANGS[lang] && name && en.has(id)) local.push([name.replace(/\s+/g, ''), en.get(id)]);
+  }
+  local.sort((a, b) => b[0].length - a[0].length);
+  return { local, english: [...new Set(en.values())].sort((a, b) => b.length - a.length) };
+}
+
+async function loadSpecies() {
+  if (species) return species;
+  if (Date.now() - speciesTried < 10 * 60 * 1000) return null;
+  speciesTried = Date.now();
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20000);
+    const r = await fetch(SPECIES_CSV, { signal: ctrl.signal });
+    clearTimeout(t);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    species = buildSpecies(await r.text());
+    console.log(`species names: ${species.local.length} loaded`);
+  } catch (e) {
+    console.log('species names: could not load (' + e.message + ')');
+  }
+  return species;
+}
+
+// "ドラメシヤ" read as "Drakloak" -> "Dreepy"; keeps Mega / ex / V etc. from the AI's name
+async function fixNameFromPrinted(d) {
+  const printed = str(d.name_printed).replace(/\s+/g, '');
+  if (!printed) return d.name;
+  const sp = await loadSpecies();
+  if (!sp) return d.name;
+  const hit = sp.local.find(([local]) => local.length >= 2 && printed.includes(local));
+  if (!hit) return d.name; // a Trainer or Energy card, or a name we don't know
+  const right = hit[1];
+  const name = str(d.name);
+  const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`\\b${esc(right)}\\b`, 'i').test(name)) return name;
+  const wrong = sp.english.find((e) => new RegExp(`\\b${esc(e)}\\b`, 'i').test(name));
+  let fixed;
+  if (wrong) fixed = name.replace(new RegExp(`\\b${esc(wrong)}\\b`, 'i'), right);
+  else if (isLatin(name) && name) return name; // e.g. a Trainer card that mentions a Pokémon
+  else {
+    const mega = /^(メガ|超级|超級|메가)/.test(printed) ? 'Mega ' : '';
+    const suffix = (printed.match(/(VMAX|VSTAR|GX|ex|EX|V)$/) || [])[1] || '';
+    fixed = `${mega}${right}${suffix ? ' ' + suffix : ''}`;
+  }
+  console.log(`name fix: "${name}" -> "${fixed}" (printed ${printed})`);
+  return fixed;
+}
+
 async function lookupCard(d) {
   const langs = tcgdexLangs(d.language);
+  if (langs.length) d.name = await fixNameFromPrinted(d);
   if (langs.length) d.name = await correctEnglishName(d.name);
   if (langs.length) return tcgdexLookup(d, langs);
   return lookupEnglish(d);
@@ -664,7 +744,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
-const PULSE_PRICE_VERSION = 6; // bump to ignore prices cached under an older rule
+const PULSE_PRICE_VERSION = 7; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
@@ -772,6 +852,8 @@ function printingLang(r) {
   }
   const m = pulseSetPart(r).match(/[_-](jp|ja|kr|ko|scn|tcn|cn|tw|zh|sc|tc|th|id)(?:$|[_-])/);
   if (m) return PULSE_LANG_SUFFIX[m[1]];
+  // Chinese-only sets without a suffix: Gem Packs (CBB1C…), CS / CSV / CSM sets
+  if (/^(cbb\d|csv\d|csm\d|cs\d)/.test(pulseSetPart(r))) return 'zh';
   // Some printings (e.g. Chinese) have no suffix, but their names are in their own script
   const text = [r && r.product_id, r && r.name, r && r.product_name, r && r.set_name].filter(Boolean).join(' ');
   if (/[\u3040-\u30ff]/.test(text)) return 'ja';
@@ -846,13 +928,14 @@ function rankVersions(list, finish, stamp) {
 function pickPulseResult(results, setId, cardNumber, lang = 'en', finish = '', stamp = '') {
   if (lang === true) lang = 'en';
   if (lang === false) lang = null;
+  const ids = (Array.isArray(setId) ? setId : String(setId || '').split(',')).filter(Boolean);
+  const inOurSet = (r) => ids.some((id) => sameSetCode(stripLangSuffix(pulseSetPart(r)), stripLangSuffix(id)));
   const usable = results.filter((r) => pulsePriceOf(r) && (!lang || printingLang(r) === lang));
   const numberMatches = cardNumber ? usable.filter((r) => sameCardNumber(r.card_number, cardNumber)) : [];
   let group = null;
   let how = '';
   if (setId) {
-    const ids = (Array.isArray(setId) ? setId : String(setId).split(',')).filter(Boolean);
-    const exact = numberMatches.filter((r) => ids.some((id) => sameSetCode(stripLangSuffix(pulseSetPart(r)), stripLangSuffix(id))));
+    const exact = numberMatches.filter(inOurSet);
     if (exact.length) { group = exact; how = 'set+number'; }
   }
   if (!group) {
@@ -892,19 +975,24 @@ async function pulseLookup({ name, nameLocal, number, total, setId, setLabel, la
   const local = lang && lang !== 'en' ? pulseName(nameLocal) : '';
   if (local && local !== q) for (const cn of variants.slice(0, 2)) tries.push({ q: local, card_number: cn });
   if (q) tries.push({ q, limit: '40' }); // name only, wider net
+  // last resort: the number on its own, accepted only if the set code also matches
+  if (setId && printed) tries.push({ card_number: printed, limit: '40', numberOnly: true });
 
   let result = null;
   const tried = [];
-  for (const params of tries) {
-    const found = await pulseSearch(params);
+  for (const p of tries) {
+    const { numberOnly, ...params } = p;
+    let found = [];
+    try { found = await pulseSearch(params); } catch (e) { if (e.code === 'limit' || !numberOnly) throw e; }
     tried.push({
       search: [params.q, params.card_number].filter(Boolean).join(' '),
       results: found.length,
       sample: found.filter((r) => !lang || printingLang(r) === lang).slice(0, 3).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')),
       otherLanguageSkipped: lang ? found.filter((r) => printingLang(r) !== lang).length : 0,
+      skippedSample: lang ? found.filter((r) => printingLang(r) !== lang).slice(0, 2).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')) : [],
     });
     const pick = pickPulseResult(found, setId, printed, lang, finish, stamp);
-    if (pick) {
+    if (pick && (!numberOnly || pick.how === 'set+number')) {
       const best = pick.result;
       const price = pulsePriceOf(best);
       result = {
@@ -1341,4 +1429,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, buildItemXml, parseTradingResponse, sealToken, openToken, correctEnglishName, editDistance, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, fixNameFromPrinted, buildSpecies, buildItemXml, parseTradingResponse, sealToken, openToken, correctEnglishName, editDistance, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
