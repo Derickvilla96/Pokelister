@@ -47,20 +47,22 @@ Read the text printed on the card itself rather than guessing from the artwork. 
 
 Reply with ONLY a JSON object, no other text, in exactly this shape:
 {"cards":[{
-  "name": "card name exactly as printed, including suffixes like ex, V, VMAX, VSTAR, GX, EX",
+  "name": "the card's official ENGLISH name, including suffixes like ex, V, VMAX, VSTAR, GX, EX. For a Japanese, Chinese, Korean or other non-English card, give the English name of the same card (e.g. ルンパッパ -> Ludicolo, メガゲンガーex -> Mega Gengar ex, 皮卡丘 -> Pikachu)",
+  "name_printed": "the name exactly as printed on the card, in its own script (e.g. ルンパッパ). Empty string if the card is in English",
   "number": "collector number before the slash, exactly as printed (keep leading zeros)",
   "set_total": "number after the slash, or empty string if there is none",
-  "set_name": "your best guess at the set name, or empty string",
+  "set_name": "your best guess at the set name in English (for Japanese sets use the usual English name, e.g. 'Mega Dream ex', 'Terastal Festival ex'), or empty string",
   "set_code": "set code printed on the card if visible (e.g. PAL, OBF, SVI), or empty string",
   "rarity": "your best guess at the rarity",
   "finish": "one of: normal, holo, reverse holo, unknown",
   "first_edition": false,
   "stamp": "ONLY if a stamp is clearly visible on the card: its short name, max 30 characters, e.g. 'Twilight Masquerade', 'Prerelease', 'Pokémon Center', 'Staff'. Empty string if there is no stamp or you're not sure (mention a possible stamp in notes instead)",
-  "language": "English, Japanese, etc.",
+  "language": "the language of the PRINTED TEXT on the card: one of English, Japanese, Chinese, Korean, French, German, Italian, Spanish, Portuguese, Thai, Indonesian",
   "notes": "anything a seller should know: graded slab, visible damage, promo stamp, card hard to read; empty string if nothing",
   "confidence": 0.9
 }]}
 "first_edition" is true only if a 1st Edition stamp is visible. Look carefully for stamps: they are small logos or words printed on the artwork or text box (often in gold or foil). Don't count the normal set symbol next to the card number, or the 1st Edition stamp (that's "first_edition"). "confidence" is a number from 0 to 1 for how sure you are of the name AND number.
+Decide "language" from the card's printed words (name, attack names, rules text), never from the art style: lots of English cards have anime-style or Japanese-looking artwork. Japanese text uses kana (ひらがな / カタカナ) mixed with kanji; Chinese text uses only Chinese characters with no kana; Korean uses Hangul. If the attacks and rules text are in English, the card is English.
 If the photo shows only the BACK of a card or cards (the standard blue Poké Ball back) and no card fronts, reply {"cards":[],"card_back":true}.
 If no card is visible at all, reply {"cards":[]}.`;
 
@@ -154,6 +156,7 @@ function cleanDetected(c) {
   if (!isFinite(confidence)) confidence = 0.5;
   return {
     name: str(c.name),
+    name_printed: str(c.name_printed),
     number: str(c.number).replace(/\s+/g, ''),
     set_total: str(c.set_total).replace(/\s+/g, ''),
     set_name: str(c.set_name),
@@ -352,7 +355,165 @@ function scoreCandidate(c, d) {
   return s;
 }
 
+// ---------- Japanese / Chinese / Asian cards: TCGdex ----------
+// pokemontcg.io only has English cards. TCGdex (free, no key) also has Japanese,
+// Traditional Chinese, Thai and Indonesian cards (Simplified Chinese and Korean are partial).
+// European-language cards share English numbering, so they keep using pokemontcg.io.
+const TCGDEX_URL = 'https://api.tcgdex.net/v2';
+
+function tcgdexLangs(language) {
+  const l = String(language || '').toLowerCase();
+  if (/japan/.test(l)) return ['ja'];
+  if (/simplified/.test(l)) return ['zh-cn', 'zh-tw'];
+  if (/chin|taiwan/.test(l)) return ['zh-tw', 'zh-cn'];
+  if (/korea/.test(l)) return ['ko'];
+  if (/thai/.test(l)) return ['th'];
+  if (/indones/.test(l)) return ['id'];
+  return [];
+}
+
+const isLatin = (t) => !!t && !/[^\u0000-\u024F\u2000-\u206F\u00E9]/.test(t);
+
+const tcgdexCache = new Map(); // url -> { at, data }
+async function tcgdexGet(pathAndQuery) {
+  const url = TCGDEX_URL + pathAndQuery;
+  const hit = tcgdexCache.get(url);
+  if (hit && Date.now() - hit.at < 6 * 60 * 60 * 1000) return hit.data;
+  let res = await fetchJSON(url, {}, 20000).catch((e) => ({ ok: false, status: e.message }));
+  if (!res.ok && res.status !== 404) {
+    await new Promise((r) => setTimeout(r, 1200));
+    res = await fetchJSON(url, {}, 20000).catch((e) => ({ ok: false, status: e.message }));
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error('the Japanese/Chinese card database didn\'t answer');
+  if (tcgdexCache.size > 3000) tcgdexCache.clear();
+  tcgdexCache.set(url, { at: Date.now(), data: res.data });
+  return res.data;
+}
+
+async function tcgdexSet(lang, setId) {
+  try { return await tcgdexGet(`/${lang}/sets/${encodeURIComponent(setId)}`); } catch { return null; }
+}
+
+// Japanese rarity codes -> the English names buyers search for
+const JP_RARITY = { C: 'Common', U: 'Uncommon', R: 'Rare', RR: 'Double Rare', RRR: 'Triple Rare', AR: 'Art Rare (AR)',
+  SAR: 'Special Art Rare (SAR)', SR: 'Super Rare (SR)', UR: 'Ultra Rare (UR)', HR: 'Hyper Rare (HR)', CHR: 'Character Rare (CHR)',
+  CSR: 'Character Super Rare (CSR)', S: 'Shiny Rare (S)', SSR: 'Shiny Super Rare (SSR)', K: 'Radiant Rare', PR: 'Promo',
+  ACE: 'ACE SPEC Rare', MUR: 'Mega Ultra Rare (MUR)', BWR: 'Black White Rare (BWR)', MA: 'Mega Attack Rare (MA)' };
+function jpRarity(r) {
+  const k = String(r || '').trim().toUpperCase();
+  return JP_RARITY[k] || '';
+}
+// TCGdex gives the category in the card's own language
+function categoryOf(cat) {
+  const c = String(cat || '');
+  if (/pok|ポケモン|宝可梦|寶可夢|포켓몬|โปเกมอน/i.test(c)) return 'Pokémon';
+  if (/train|トレーナー|训练家|訓練家|트레이너|เทรนเนอร์|trainer/i.test(c)) return 'Trainer';
+  if (/energ|エネルギー|能量|에너지|พลังงาน/i.test(c)) return 'Energy';
+  return '';
+}
+
+function tcgdexToCandidate(card, set, lang, d) {
+  const cs = card.set || {};
+  const counts = cs.cardCount || (set && set.cardCount) || {};
+  const img = card.image ? String(card.image) : '';
+  const category = String(card.category || '');
+  const englishName = d && isLatin(d.name) ? d.name : '';
+  const englishSet = d && isLatin(d.set_name) ? d.set_name : '';
+  const rarity = jpRarity(card.rarity) || (d && d.rarity) || (isLatin(card.rarity) && !/^none$/i.test(card.rarity || '') ? card.rarity : '');
+  return {
+    id: `tcgdex:${lang}:${card.id}`,
+    source: 'tcgdex',
+    lang,
+    name: englishName || card.name || '',
+    nameLocal: card.name || '',
+    number: String(card.localId || ''),
+    setName: englishSet || cs.name || '',
+    setNameLocal: cs.name || '',
+    setId: String(cs.id || '').toLowerCase(),
+    series: '',
+    printedTotal: counts.official || '',
+    ptcgoCode: '',
+    releaseDate: (set && set.releaseDate) || '',
+    rarity,
+    supertype: categoryOf(category),
+    subtypes: [],
+    types: Array.isArray(card.types) ? card.types : [],
+    image: img ? img + '/low.png' : '',
+    imageLarge: img ? img + '/high.png' : '',
+    cmTrend: null, cmReverseHoloTrend: null, tcgMarket: null,
+  };
+}
+
+function scoreLocal(c, d) {
+  let s = 0;
+  if (normNumber(d.number) && normNumber(d.number) === normNumber(c.number)) s += 4;
+  if (/^\d+$/.test(d.set_total) && String(c.printedTotal) === String(parseInt(d.set_total, 10))) s += 3;
+  const strip = (t) => String(t || '').replace(/\s+/g, '').toLowerCase();
+  const a = strip(d.name_printed);
+  const b = strip(c.nameLocal);
+  if (a && a === b) s += 3;
+  else if (a && b && (a.includes(b) || b.includes(a))) s += 2;
+  else if (strip(d.name) && strip(d.name) === b) s += 3;
+  return s;
+}
+
+// Search one language: by printed name, then by number alone. Returns full candidates.
+async function tcgdexSearchLang(lang, d, name) {
+  const n = normNumber(d.number);
+  const total = /^\d+$/.test(d.set_total) ? String(parseInt(d.set_total, 10)) : '';
+  let brief = [];
+  if (name) {
+    brief = (await tcgdexGet(`/${lang}/cards?name=eq:${encodeURIComponent(name)}`)) || [];
+    if (!brief.length) brief = (await tcgdexGet(`/${lang}/cards?name=${encodeURIComponent(name)}`)) || [];
+  }
+  let picks = n ? brief.filter((b) => normNumber(b.localId) === n) : brief;
+  if (!picks.length && n) {
+    // the AI may have misread the printed name: look the number up instead
+    const raw = String(d.number || '').trim();
+    const forms = [...new Set([raw, /^\d+$/.test(raw) ? raw.padStart(3, '0') : raw, n])].filter(Boolean);
+    for (const f of forms) {
+      const byNum = (await tcgdexGet(`/${lang}/cards?localId=eq:${encodeURIComponent(f)}`)) || [];
+      picks = byNum.filter((b) => normNumber(b.localId) === n);
+      if (picks.length) break;
+    }
+  }
+  if (!picks.length) picks = brief;
+  picks = picks.slice(0, 16);
+  const full = await mapLimit(picks, 4, async (b) => {
+    try { return await tcgdexGet(`/${lang}/cards/${encodeURIComponent(b.id)}`); } catch { return null; }
+  });
+  let cards = full.filter(Boolean);
+  if (total) {
+    const sameTotal = cards.filter((c) => String((c.set && c.set.cardCount && c.set.cardCount.official) || '') === total);
+    if (sameTotal.length) cards = sameTotal;
+  }
+  cards = cards.slice(0, 8);
+  const sets = await mapLimit(cards, 4, (c) => (c.set && c.set.id ? tcgdexSet(lang, c.set.id) : null));
+  return cards.map((c, i) => tcgdexToCandidate(c, sets[i], lang, d));
+}
+
+async function tcgdexLookup(d, langs) {
+  const name = d.name_printed || (isLatin(d.name) ? '' : d.name);
+  let lastErr = null;
+  for (const lang of langs) {
+    let list = [];
+    try { list = await tcgdexSearchLang(lang, d, name); } catch (e) { lastErr = e; continue; }
+    if (list.length) {
+      return list.map((c) => ({ ...c, score: scoreLocal(c, d) })).sort((a, b) => b.score - a.score).slice(0, 10);
+    }
+  }
+  if (lastErr) throw lastErr;
+  return [];
+}
+
 async function lookupCard(d) {
+  const langs = tcgdexLangs(d.language);
+  if (langs.length) return tcgdexLookup(d, langs);
+  return lookupEnglish(d);
+}
+
+async function lookupEnglish(d) {
   const n = normNumber(d.number);
   const total = /^\d+$/.test(d.set_total) ? String(parseInt(d.set_total, 10)) : '';
   const firstWord = (d.name.split(/[\s-]/)[0] || '').replace(/[^\p{L}\p{N}']/gu, '');
@@ -384,7 +545,11 @@ async function lookupCard(d) {
 // Plain-English reasons a card needs checking
 function reasonsFor(d, candidates) {
   const out = [];
-  if (!candidates.length) return ['no card in the database matched'];
+  if (!candidates.length) {
+    return tcgdexLangs(d.language).length
+      ? [`no ${d.language} card in the database matched – type the price in, or use Search`]
+      : ['no card in the database matched'];
+  }
   const top = candidates[0];
   const runnerUp = candidates[1];
   if (d.confidence < 0.6) out.push('the AI wasn\'t sure it read the name or number correctly');
@@ -404,7 +569,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
-const PULSE_PRICE_VERSION = 4; // bump to ignore prices cached under an older rule
+const PULSE_PRICE_VERSION = 5; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
@@ -501,6 +666,28 @@ function isForeignPrinting(r) {
   return /_(jp|kr|cn|tw|th|id|ja|ko|zh)$/.test(pulseSetPart(r)) || /[_-](jp|kr|cn|tw)[_-]/.test(pulseSetPart(r));
 }
 
+// Which language a Pulse printing is: 'en' (no suffix), 'ja', 'zh', 'ko', 'th', 'id'
+const PULSE_LANG_SUFFIX = { jp: 'ja', ja: 'ja', kr: 'ko', ko: 'ko', cn: 'zh', tw: 'zh', zh: 'zh', sc: 'zh', tc: 'zh', th: 'th', id: 'id' };
+function printingLang(r) {
+  const m = pulseSetPart(r).match(/[_-](jp|ja|kr|ko|cn|tw|zh|sc|tc|th|id)(?:$|[_-])/);
+  return m ? PULSE_LANG_SUFFIX[m[1]] : 'en';
+}
+// The card's language as Pulse would label it. null = don't filter (e.g. French: Pulse
+// doesn't list those separately, so behave as before).
+function wantedLang(language) {
+  const l = String(language || '').toLowerCase();
+  if (!l || /english/.test(l)) return 'en';
+  if (/japan/.test(l)) return 'ja';
+  if (/chin|taiwan/.test(l)) return 'zh';
+  if (/korea/.test(l)) return 'ko';
+  if (/thai/.test(l)) return 'th';
+  if (/indones/.test(l)) return 'id';
+  return null;
+}
+function stripLangSuffix(setPart) {
+  return String(setPart || '').replace(/[_-](jp|ja|kr|ko|cn|tw|zh|sc|tc|th|id)$/, '');
+}
+
 // The card database and Pulse spell some set ids differently, e.g. Mega Evolution is
 // "me1" in the database but "m1" in Pulse. Compare them in one shared form.
 // Spellings seen so far: Mega Evolution "me1" (database) / "m1" (Pulse),
@@ -546,13 +733,17 @@ function rankVersions(list, finish, stamp) {
 }
 
 // Returns { result, how, versions } or null. how = 'set+number' (safe) or 'number' (no set confirmation).
-function pickPulseResult(results, setId, cardNumber, english = true, finish = '', stamp = '') {
-  const usable = results.filter((r) => pulsePriceOf(r) && !(english && isForeignPrinting(r)));
+// lang: 'en', 'ja', 'zh'... only printings in that language count; null = any.
+// (true/false are still accepted for English / not English.)
+function pickPulseResult(results, setId, cardNumber, lang = 'en', finish = '', stamp = '') {
+  if (lang === true) lang = 'en';
+  if (lang === false) lang = null;
+  const usable = results.filter((r) => pulsePriceOf(r) && (!lang || printingLang(r) === lang));
   const numberMatches = cardNumber ? usable.filter((r) => sameCardNumber(r.card_number, cardNumber)) : [];
   let group = null;
   let how = '';
   if (setId) {
-    const exact = numberMatches.filter((r) => normSetId(pulseSetPart(r)) === normSetId(setId));
+    const exact = numberMatches.filter((r) => normSetId(stripLangSuffix(pulseSetPart(r))) === normSetId(stripLangSuffix(setId)));
     if (exact.length) { group = exact; how = 'set+number'; }
   }
   if (!group) {
@@ -577,17 +768,20 @@ function cardNumberVariants(number, total) {
   return [...new Set([`${n}/${t}`, `${pad(n)}/${pad(t)}`, `${parseInt(n, 10)}/${parseInt(t, 10)}`])];
 }
 
-async function pulseLookup({ name, number, total, setId, setLabel, language, finish, stamp }) {
+async function pulseLookup({ name, nameLocal, number, total, setId, setLabel, language, finish, stamp }) {
   if (!PULSE_KEY) return { status: 'off' };
   const variants = cardNumberVariants(number, total);
   const printed = variants[0] || '';
-  const english = !language || /^english$/i.test(language);
-  const key = `v${PULSE_PRICE_VERSION}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}|${String(finish || '').toLowerCase()}|${String(stamp || '').toLowerCase()}`;
+  const lang = wantedLang(language);
+  const key = `v${PULSE_PRICE_VERSION}|${lang || 'any'}|${String(setId || '').toLowerCase()}|${numPart(number)}|${pulseName(name).toLowerCase()}|${String(finish || '').toLowerCase()}|${String(stamp || '').toLowerCase()}`;
   const hit = pulseCache.get(key);
   if (hit && Date.now() - hit.at < (hit.result.status === 'ok' ? PULSE_CACHE_MS : PULSE_NOMATCH_CACHE_MS)) return hit.result;
 
   const q = pulseName(name);
   const tries = variants.map((cn) => ({ q, card_number: cn }));
+  // Japanese/Chinese cards: Pulse may list them under the printed name instead
+  const local = lang && lang !== 'en' ? pulseName(nameLocal) : '';
+  if (local && local !== q) for (const cn of variants.slice(0, 2)) tries.push({ q: local, card_number: cn });
   if (q) tries.push({ q, limit: '40' }); // name only, wider net
 
   let result = null;
@@ -597,10 +791,10 @@ async function pulseLookup({ name, number, total, setId, setLabel, language, fin
     tried.push({
       search: [params.q, params.card_number].filter(Boolean).join(' '),
       results: found.length,
-      sample: found.filter((r) => !(english && isForeignPrinting(r))).slice(0, 3).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')),
-      foreignSkipped: english ? found.filter(isForeignPrinting).length : 0,
+      sample: found.filter((r) => !lang || printingLang(r) === lang).slice(0, 3).map((r) => String(r.product_id || r.card_number || '?').split('|').slice(0, 3).join('|')),
+      otherLanguageSkipped: lang ? found.filter((r) => printingLang(r) !== lang).length : 0,
     });
-    const pick = pickPulseResult(found, setId, printed, english, finish, stamp);
+    const pick = pickPulseResult(found, setId, printed, lang, finish, stamp);
     if (pick) {
       const best = pick.result;
       const price = pulsePriceOf(best);
@@ -618,7 +812,7 @@ async function pulseLookup({ name, number, total, setId, setLabel, language, fin
     }
   }
   // explain a miss so a screenshot shows what happened
-  if (!result) result = { status: 'nomatch', tried, wanted: { number: printed, set: setLabel || setId || '' } };
+  if (!result) result = { status: 'nomatch', tried, wanted: { number: printed, set: setLabel || setId || '', language: language || 'English' } };
   pulseCache.set(key, { at: Date.now(), result });
   return result;
 }
@@ -630,12 +824,12 @@ function pulseQueryFor(candidate, detected) {
     const printedNum = d.number && numPart(d.number) === numPart(candidate.number) ? d.number : candidate.number;
     // keep the total as printed on the card ("086", not "86") when it's the same number
     const printedTotal = d.set_total && numPart(d.set_total) === numPart(candidate.printedTotal) ? d.set_total : String(candidate.printedTotal || '');
-    return { name: candidate.name, number: printedNum, total: printedTotal,
+    return { name: candidate.name, nameLocal: candidate.nameLocal || d.name_printed || '', number: printedNum, total: printedTotal,
       setId: candidate.setId, setLabel: candidate.setName, language: d.language, finish: d.finish, stamp: d.stamp };
   }
   const d = detected || {};
-  return { name: d.name, number: d.number, total: d.set_total,
-    setId: guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language, finish: d.finish, stamp: d.stamp };
+  return { name: d.name, nameLocal: d.name_printed || '', number: d.number, total: d.set_total,
+    setId: tcgdexLangs(d.language).length ? '' : guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language, finish: d.finish, stamp: d.stamp };
 }
 
 async function safePulse(query) {
@@ -659,7 +853,7 @@ async function matchOne(d) {
   }
   const pulse = await safePulse(pulseQueryFor(candidates[0], d));
   return { detected: d, candidates, status: error || !candidates.length ? 'nomatch' : statusFor(d, candidates),
-    reasons: error ? ['the card database didn\'t answer'] : reasonsFor(d, candidates), pulse, ...(error ? { error } : {}) };
+    reasons: error ? [error.includes('Japanese') ? error : 'the card database didn\'t answer'] : reasonsFor(d, candidates), pulse, ...(error ? { error } : {}) };
 }
 
 async function handleMatch(req, res) {
@@ -682,7 +876,7 @@ async function handlePulse(url, res) {
   const g = (k) => str(url.searchParams.get(k));
   if (!g('name') && !g('number')) return sendJSON(res, 400, { error: 'Need a card name or number' });
   const setId = g('setId') || guessSetId(g('setCode'), g('setName'));
-  const result = await safePulse({ name: g('name'), number: g('number'), total: g('total'), setId,
+  const result = await safePulse({ name: g('name'), nameLocal: g('nameLocal'), number: g('number'), total: g('total'), setId,
     setLabel: g('setName') || g('setCode') || setId, language: g('language'), finish: g('finish'), stamp: g('stamp') });
   sendJSON(res, 200, { pulse: result, creditsLeft: pulseCreditsLeft() });
 }
@@ -698,6 +892,21 @@ async function handlePhoto(req, res) {
 }
 
 async function handleSearch(url, res) {
+  const langs = tcgdexLangs(url.searchParams.get('language'));
+  if (langs.length) {
+    const name = str(url.searchParams.get('name'));
+    const number = str(url.searchParams.get('number'));
+    if (!name && !number) return sendJSON(res, 400, { error: 'Enter a name or number' });
+    const englishName = str(url.searchParams.get('englishName'));
+    const d = cleanDetected({ name: isLatin(name) ? name : (isLatin(englishName) ? englishName : ''), name_printed: isLatin(name) ? '' : name,
+      set_name: str(url.searchParams.get('englishSet')), number, language: url.searchParams.get('language') });
+    let found = [];
+    for (const lang of langs) {
+      found = await tcgdexSearchLang(lang, d, d.name_printed || name);
+      if (found.length) break;
+    }
+    return sendJSON(res, 200, { candidates: found });
+  }
   const name = str(url.searchParams.get('name'));
   const number = normNumber(url.searchParams.get('number'));
   const set = str(url.searchParams.get('set'));
@@ -774,4 +983,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
