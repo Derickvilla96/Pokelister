@@ -614,10 +614,10 @@
     const c = chosen(r);
     const d = r.detected || {};
     const q = c
-      ? { name: c.name, number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
+      ? { name: c.name, nameLocal: c.nameLocal || d.name_printed || '', number: d.number && normNumber(d.number) === normNumber(c.number) ? d.number : c.number,
           total: d.set_total && normNumber(d.set_total) === normNumber(c.printedTotal) ? d.set_total : String(c.printedTotal || ''),
           setId: c.setId || '', setName: c.setName || '', language: d.language || '', finish: r.finish || '', stamp: r.stamp || '' }
-      : { name: d.name || '', number: d.number || '', total: d.set_total || '', setId: '',
+      : { name: d.name || '', nameLocal: d.name_printed || '', number: d.number || '', total: d.set_total || '', setId: '',
           setCode: d.set_code || '', setName: d.set_name || '', language: d.language || '', finish: r.finish || '', stamp: r.stamp || '' };
     r.pulse = { status: 'pending' };
     rerenderRow(r);
@@ -1063,6 +1063,7 @@
           <label class="field"><span>Condition</span><select data-f="condition">${condOpts}</select></label>
           <label class="field"><span>Finish</span><select data-f="finish">${finishOpts}</select></label>
         </div>
+        <label class="field"><span>Card language</span><select data-f="language"${r._matching ? ' disabled' : ''}>${languageOpts(r)}</select></label>
         <label class="check"><input type="checkbox" data-f="firstEd"${r.firstEd ? ' checked' : ''}> 1st Edition</label>
         <label class="field"><span>Stamp ${String(r.stamp || '').trim() ? '<em class="stamp-flag">⭐ stamped</em>' : '(leave blank if none)'}</span>
           <input data-f="stamp" value="${esc(r.stamp || '')}" placeholder="e.g. Twilight Masquerade, Prerelease, Pokémon Center"></label>
@@ -1093,6 +1094,38 @@
         </div>
       </div>`;
     return el;
+  }
+
+  const LANGUAGES = ['English', 'Japanese', 'Chinese', 'Korean', 'French', 'German', 'Italian', 'Spanish', 'Portuguese', 'Thai', 'Indonesian'];
+  function languageOpts(r) {
+    const cur = (r.detected && r.detected.language) || 'English';
+    const list = LANGUAGES.some((l) => l.toLowerCase() === cur.toLowerCase()) ? LANGUAGES : [cur, ...LANGUAGES];
+    return list.map((l) => `<option${l.toLowerCase() === cur.toLowerCase() ? ' selected' : ''}>${esc(l)}</option>`).join('');
+  }
+
+  // Look the card up again (after a database hiccup, or when you change its language)
+  async function rematch(r) {
+    r._matching = true;
+    rerenderRow(r);
+    try {
+      const m = await api('/api/match', { method: 'POST', body: JSON.stringify({ detected: r.detected }) });
+      r.candidates = m.candidates || [];
+      r.chosen = r.candidates.length ? 0 : -1;
+      r.status = m.status || (r.chosen >= 0 ? 'check' : 'nomatch');
+      r.dbError = m.error || '';
+      r.reasons = Array.isArray(m.reasons) ? m.reasons : [];
+      r.pulse = m.pulse || null;
+      r.pulseManual = '';
+      r.priceAuto = true;
+      refreshDerived(r);
+      toast(r.chosen >= 0 ? 'Card matched' : (r.dbError ? 'Card database still not answering, try again shortly' : 'Still no match, try Search'));
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      r._matching = false;
+      rerenderRow(r);
+      saveRows();
+    }
   }
 
   function renderList() {
@@ -1267,6 +1300,12 @@
         refreshDerived(r);
         rerenderRow(r);
         fetchPulse(r);
+      } else if (f === 'language') {
+        r.detected = { ...(r.detected || {}), language: e.target.value };
+        // the AI's English name is fine for any language; the printed name only applies to its own
+        if (/^english$/i.test(e.target.value)) r.detected.name_printed = '';
+        searchResults.delete(r.id);
+        rematch(r);
       } else if (f === 'condition') {
         r.condition = e.target.value;
       } else if (f === 'stamp') {
@@ -1351,6 +1390,9 @@
           name: box.querySelector('.s-name').value.trim(),
           number: box.querySelector('.s-number').value.trim(),
           set: box.querySelector('.s-set').value.trim(),
+          language: (r.detected && r.detected.language) || 'English',
+          englishName: (r.detected && r.detected.name) || '',
+          englishSet: (r.detected && r.detected.set_name) || '',
         });
         btn.disabled = true;
         btn.textContent = 'Searching…';
@@ -1384,26 +1426,7 @@
       } else if (a === 'getPulse') {
         fetchPulse(r);
       } else if (a === 'retryMatch') {
-        r._matching = true;
-        rerenderRow(r);
-        try {
-          const m = await api('/api/match', { method: 'POST', body: JSON.stringify({ detected: r.detected }) });
-          r.candidates = m.candidates || [];
-          r.chosen = r.candidates.length ? 0 : -1;
-          r.status = m.status || (r.chosen >= 0 ? 'check' : 'nomatch');
-          r.dbError = m.error || '';
-          r.reasons = Array.isArray(m.reasons) ? m.reasons : [];
-          r.pulse = m.pulse || null;
-          r.pulseManual = '';
-          refreshDerived(r);
-          toast(r.chosen >= 0 ? 'Card matched' : (r.dbError ? 'Card database still not answering, try again shortly' : 'Still no match, try Search'));
-        } catch (err) {
-          toast(err.message);
-        } finally {
-          r._matching = false;
-          rerenderRow(r);
-          saveRows();
-        }
+        await rematch(r);
       }
     });
 
