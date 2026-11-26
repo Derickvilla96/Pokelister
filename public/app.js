@@ -113,6 +113,7 @@
   let nextRole = 'front';        // in front & back mode: what the next photo is
   let lastFrontJobId = null;
   let jobSeq = 0;
+  const jobBySeq = new Map();    // seq -> job, kept after the thumbnail disappears
   let running = 0;
   let saveTimer = null;
   let rowPhotoTarget = null;     // { rowId, side } for the Add back / Replace front buttons
@@ -272,6 +273,7 @@
         lastFrontJobId = job.id;
       }
       jobs.push(job);
+      jobBySeq.set(job.seq, job);
     }
     renderJobs();
     renderNextHint();
@@ -283,7 +285,9 @@
       const job = jobs.find((j) => j.status === 'queued');
       if (!job) break;
       running++;
-      const work = job.role === 'back' ? runBackJob(job) : runFrontJob(job);
+      // Every photo is read, so a front picked where a back was expected (or the other way
+      // round) still ends up in the right place.
+      const work = runFrontJob(job);
       work.finally(() => { running--; renderJobs(); pump(); });
     }
   }
@@ -321,21 +325,26 @@
       const cards = data.cards || [];
 
       if (!cards.length && data.cardBack) {
-        // A card back taken outside front & back mode: attach it to the previous photo.
-        const prev = jobs.filter((j) => j.role === 'front' && j.seq < job.seq && j.id !== job.id).pop();
-        const prevRows = prev ? rows.filter((r) => r.jobId === prev.id) : [];
-        const target = prev && (prevRows.length || prev.status !== 'error') ? prev.id : (rows[0] && rows[0].jobId);
+        // A card back belongs to the photo picked just before it (front, back, front, back…).
+        // If that photo was a back too, use the nearest earlier front.
+        let prev = jobBySeq.get(job.seq - 1);
+        if (!prev || prev.role === 'back' && prev.status === 'done') {
+          prev = [...jobBySeq.values()].filter((j) => j.seq < job.seq && !(j.role === 'back' && j.status === 'done')).pop();
+        }
+        const target = prev ? prev.id : (rows[0] && rows[0].jobId);
         if (!target) throw new Error('That was a card back — scan the front first');
         await upload;
         job.role = 'back';
         job.pairedWith = target;
+        if (prev) prev.role = 'front';
         setBack(target, { url: job.frontUrl || '', thumb: job.thumb, error: job.uploadError });
         finishJob(job, 0);
-        toast('Card back added to the previous card');
+        if (!settings.pairsMode) toast('Card back added to the previous card');
         return;
       }
       if (!cards.length) throw new Error('No card found in this photo');
 
+      job.role = 'front'; // it shows a card, whatever position it was picked in
       await upload;
       const back = backs.get(job.id);
       const newRows = cards.map((c) => makeRow(c, job, back));
@@ -405,8 +414,8 @@
     const el = $('#nextHint');
     if (!settings.pairsMode) { el.innerHTML = ''; return; }
     el.innerHTML = nextRole === 'back'
-      ? '<span>Next photo: <strong>BACK</strong> of the last card</span><button class="btn small" id="skipBack">Skip back</button>'
-      : '<span>Next photo: <strong>FRONT</strong> of a card. Library: pick front, back, front, back…</span>';
+      ? '<span>Next photo: <strong>BACK</strong> of the last card. PokeLister checks each photo, so a slip in the order is fixed for you.</span><button class="btn small" id="skipBack">Skip back</button>'
+      : '<span>Next photo: <strong>FRONT</strong> of a card. Library: pick front, back, front, back… PokeLister checks each photo, so a slip in the order is fixed for you.</span>';
   }
 
   // ---------- rows ----------
