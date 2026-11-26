@@ -56,6 +56,17 @@ public/app.js        frontend: queue, front/back pairing, review list, CSV expor
 
 **Binder pages:** the whole page photo becomes the front photo for every card on it. Use Add back on individual cards if you want backs for those.
 
+## Japanese, Chinese and other Asian cards
+
+English and European-language cards are matched against pokemontcg.io. Japanese, Chinese,
+Korean, Thai and Indonesian cards are matched against TCGdex (free, no key needed), using the
+name printed on the card and its number. Titles and item specifics still use the English
+card name (e.g. "Ludicolo 081/080 Mega Dream ex Japanese Art Rare (AR)") so eBay UK buyers
+find them. Pulse prices are taken from the Japanese/Chinese printing, never the English one.
+
+If the AI gets a card's language wrong, change **Card language** on the card and it is looked
+up again in the right database.
+
 ## Item specifics
 
 Each card has an **Item specifics** section. Tap it to open. PokeLister fills in Game, Card Name, Character, Card Type, Set, Card Number, Rarity, Finish, Language, Manufacturer, Year Manufactured, Features (1st Edition) and Graded (No) from the card match.
@@ -98,6 +109,39 @@ Default rule: **listing price = Pulse price − 10%**, never below your **Min £
 - Pulse is only trusted when it matches both the set and the card number, so a live listing never gets another printing's price.
 - Changing the match re-checks Pulse. Lookups are cached for a day, and PokeLister stops at `PULSE_DAILY_LIMIT` lookups a day, because PokeSnipe uses the same 1,000-credit daily budget.
 - Change the discount, minimum or source (Pulse or Cardmarket) in Settings → Pricing, then tap **Re-apply auto prices** to reprice everything.
+
+## Pre-upload check
+
+Download CSV, Share CSV and List on eBay all open the pre-upload check first. It fixes what it
+safely can (postage line at the top of every description, titles over 80 characters, item
+specifics over 65, prices below your minimum), leaves out cards that can't go yet (no price,
+photo not uploaded, already live on eBay) and flags the rest with a Show button.
+
+## Bulk edit and quick review
+
+- **Select & bulk edit**: tick cards (or "All shown" after tapping a filter like "4 no price"),
+  then Edit… to set condition, finish, language, price, qty or Mark OK for all of them at once.
+- **Review cards**: one card at a time with a big photo. ✓ Looks good marks it OK and moves on.
+  It reviews the cards currently shown, so tap "4 to check" first to review just those.
+
+## List straight to eBay (optional)
+
+1. Sign in at https://developer.ebay.com with your eBay account and create a developer account (free).
+2. Application Keys → create a **Production** keyset. Copy the App ID (Client ID) and Cert ID (Client Secret).
+   If eBay asks about marketplace account deletion notifications, choose that you don't store eBay user data (opt out).
+3. User Tokens → "Get a Token from eBay via Your Application" → add an eBay Redirect URL (RuName):
+   - Auth accepted URL: `https://pokelister.onrender.com/api/ebay/callback`
+   - Auth declined URL: `https://pokelister.onrender.com/api/ebay/callback`
+   - Privacy policy URL: `https://pokelister.onrender.com/`
+   Copy the RuName (looks like `Your_Name-YourApp-PRD-abc123-xyz`).
+4. On Render → Environment add `EBAY_CLIENT_ID`, `EBAY_CLIENT_SECRET` and `EBAY_RUNAME`.
+5. In PokeLister → Settings → List straight to eBay → Connect eBay account, sign in, Agree.
+   Then tap Check my policies to make sure your postage/returns policy names are found.
+6. A **List on eBay** button appears at the bottom. Use "Test 1 card first" the first time:
+   eBay checks the card without listing it.
+
+The eBay sign-in is stored on your phone, encrypted by the server. Connect once on each device.
+Listed cards show their eBay item number; "Remove listed" clears them from PokeLister.
 
 ## Uploading to eBay
 

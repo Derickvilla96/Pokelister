@@ -10,6 +10,9 @@
 //   PULSE_DAILY_LIMIT   optional — max Pulse lookups per day from PokeLister (default 400)
 //   POKEMONTCG_API_KEY  optional — free key from dev.pokemontcg.io (higher rate limit)
 //   MODEL               optional — defaults to claude-sonnet-5-5
+//   EBAY_CLIENT_ID      optional — eBay developer App ID (Client ID), to list straight to eBay
+//   EBAY_CLIENT_SECRET  optional — eBay developer Cert ID (Client Secret)
+//   EBAY_RUNAME         optional — eBay developer RuName (the redirect URL name)
 //   PORT                set automatically by Render
 
 const http = require('http');
@@ -571,7 +574,7 @@ async function correctEnglishName(name) {
   const n = str(name);
   if (!n || !isLatin(n) || n.length < 4) return n;
   // the word to check: "Mega Gengar ex" -> "Gengar", "Team Rocket's Mewtwo" -> "Mewtwo"
-  const words = n.replace(/^.+?'s\s+/, '').split(/\s+/)
+  const words = n.replace(/^.+?'s\s+/, '').replace(/^\S+\s+(form|mask|style)\s+/i, '').split(/\s+/)
     .filter((w) => !/^(mega|m|ex|gx|v|vmax|vstar|radiant|shiny|alolan|galarian|hisuian|paldean|dark|light|break|tag|team)$/i.test(w));
   const word = (words[0] || '').replace(/[^A-Za-zé'.-]/g, '');
   if (word.length < 4) return n;
@@ -661,7 +664,7 @@ function statusFor(d, candidates) {
 // ---------- step 3: PulseTCG price (same API as PokeSnipe) ----------
 
 const pulseCache = new Map(); // key -> { at, result }
-const PULSE_PRICE_VERSION = 5; // bump to ignore prices cached under an older rule
+const PULSE_PRICE_VERSION = 6; // bump to ignore prices cached under an older rule
 const PULSE_CACHE_MS = 24 * 60 * 60 * 1000;
 const PULSE_NOMATCH_CACHE_MS = 60 * 60 * 1000; // retry misses after an hour
 const pulseUsage = { day: '', count: 0 };
@@ -709,7 +712,8 @@ function guessSetId(code, name) {
 
 // Same suffix stripping PokeSnipe uses, so names match Pulse's format.
 function pulseName(name) {
-  return String(name || '').replace(/\b(ex|EX|GX|VMAX|VSTAR|V)\b/g, '').replace(/\s+/g, ' ').trim();
+  return String(name || '').replace(/\b(dusk|midday|midnight|dawn|own tempo|rainy|snowy|sunny|attack|defense|speed|origin|altered|sky|land|therian|incarnate|single strike|rapid strike|hero|zero|crowned|ice rider|shadow rider|wellspring|hearthflame|cornerstone|teal)\s+(form|mask|style)\s+/gi, '')
+    .replace(/\b(ex|EX|GX|VMAX|VSTAR|V)\b/g, '').replace(/\s+/g, ' ').trim();
 }
 
 function numPart(s) {
@@ -755,18 +759,18 @@ function pulseSetPart(r) {
   return String((r && r.product_id) || '').toLowerCase().split('|')[0].replace(/^card:/, '');
 }
 function isForeignPrinting(r) {
-  return /_(jp|kr|cn|tw|th|id|ja|ko|zh)$/.test(pulseSetPart(r)) || /[_-](jp|kr|cn|tw)[_-]/.test(pulseSetPart(r));
+  return /_(jp|kr|cn|scn|tcn|tw|th|id|ja|ko|zh)$/.test(pulseSetPart(r)) || /[_-](jp|kr|cn|scn|tcn|tw)[_-]/.test(pulseSetPart(r));
 }
 
 // Which language a Pulse printing is: 'en' (no suffix), 'ja', 'zh', 'ko', 'th', 'id'
-const PULSE_LANG_SUFFIX = { jp: 'ja', ja: 'ja', kr: 'ko', ko: 'ko', cn: 'zh', tw: 'zh', zh: 'zh', sc: 'zh', tc: 'zh', th: 'th', id: 'id' };
+const PULSE_LANG_SUFFIX = { scn: 'zh', tcn: 'zh', jp: 'ja', ja: 'ja', kr: 'ko', ko: 'ko', cn: 'zh', tw: 'zh', zh: 'zh', sc: 'zh', tc: 'zh', th: 'th', id: 'id' };
 function printingLang(r) {
   const field = String((r && (r.language || r.lang)) || '').toLowerCase();
   if (field) {
     const w = wantedLang(field) || (/^(ja|jp)/.test(field) ? 'ja' : /^(zh|cn|tw)/.test(field) ? 'zh' : /^(ko|kr)/.test(field) ? 'ko' : '');
     if (w) return w;
   }
-  const m = pulseSetPart(r).match(/[_-](jp|ja|kr|ko|cn|tw|zh|sc|tc|th|id)(?:$|[_-])/);
+  const m = pulseSetPart(r).match(/[_-](jp|ja|kr|ko|scn|tcn|cn|tw|zh|sc|tc|th|id)(?:$|[_-])/);
   if (m) return PULSE_LANG_SUFFIX[m[1]];
   // Some printings (e.g. Chinese) have no suffix, but their names are in their own script
   const text = [r && r.product_id, r && r.name, r && r.product_name, r && r.set_name].filter(Boolean).join(' ');
@@ -789,7 +793,7 @@ function wantedLang(language) {
   return null;
 }
 function stripLangSuffix(setPart) {
-  return String(setPart || '').replace(/[_-](jp|ja|kr|ko|cn|tw|zh|sc|tc|th|id)$/, '');
+  return String(setPart || '').replace(/[_-](jp|ja|kr|ko|scn|tcn|cn|tw|zh|sc|tc|th|id)$/, '');
 }
 
 // The card database and Pulse spell some set ids differently, e.g. Mega Evolution is
@@ -847,7 +851,8 @@ function pickPulseResult(results, setId, cardNumber, lang = 'en', finish = '', s
   let group = null;
   let how = '';
   if (setId) {
-    const exact = numberMatches.filter((r) => normSetId(stripLangSuffix(pulseSetPart(r))) === normSetId(stripLangSuffix(setId)));
+    const ids = (Array.isArray(setId) ? setId : String(setId).split(',')).filter(Boolean);
+    const exact = numberMatches.filter((r) => ids.some((id) => sameSetCode(stripLangSuffix(pulseSetPart(r)), stripLangSuffix(id))));
     if (exact.length) { group = exact; how = 'set+number'; }
   }
   if (!group) {
@@ -928,12 +933,13 @@ function pulseQueryFor(candidate, detected) {
     const printedNum = d.number && numPart(d.number) === numPart(candidate.number) ? d.number : candidate.number;
     // keep the total as printed on the card ("086", not "86") when it's the same number
     const printedTotal = d.set_total && numPart(d.set_total) === numPart(candidate.printedTotal) ? d.set_total : String(candidate.printedTotal || '');
+    const extraCode = candidate.source === 'tcgdex' && d.set_code ? ',' + str(d.set_code).toLowerCase() : '';
     return { name: candidate.name, nameLocal: candidate.nameLocal || d.name_printed || '', number: printedNum, total: printedTotal,
-      setId: candidate.setId, setLabel: candidate.setName, language: d.language, finish: d.finish, stamp: d.stamp };
+      setId: candidate.setId + extraCode, setLabel: candidate.setName, language: d.language, finish: d.finish, stamp: d.stamp };
   }
   const d = detected || {};
   return { name: d.name, nameLocal: d.name_printed || '', number: d.number, total: d.set_total,
-    setId: tcgdexLangs(d.language).length ? '' : guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language, finish: d.finish, stamp: d.stamp };
+    setId: tcgdexLangs(d.language).length ? str(d.set_code).toLowerCase() : guessSetId(d.set_code, d.set_name), setLabel: d.set_name || d.set_code, language: d.language, finish: d.finish, stamp: d.stamp };
 }
 
 async function safePulse(query) {
@@ -942,6 +948,249 @@ async function safePulse(query) {
   } catch (e) {
     return { status: e.code === 'limit' ? 'limit' : 'error', error: e.message };
   }
+}
+
+
+// ---------- list straight to eBay (Trading API, signed in with eBay OAuth) ----------
+// The eBay sign-in is kept on your phone, encrypted with a key only this server knows,
+// so nothing needs saving on Render (its free plan forgets files when it restarts).
+
+const EBAY_CLIENT_ID = process.env.EBAY_CLIENT_ID || '';
+const EBAY_CLIENT_SECRET = process.env.EBAY_CLIENT_SECRET || '';
+const EBAY_RUNAME = process.env.EBAY_RUNAME || '';
+const EBAY_SCOPES = [
+  'https://api.ebay.com/oauth/api_scope',
+  'https://api.ebay.com/oauth/api_scope/sell.inventory',
+  'https://api.ebay.com/oauth/api_scope/sell.account',
+].join(' ');
+const EBAY_TRADING_URL = 'https://api.ebay.com/ws/api.dll';
+const EBAY_COMPAT = '1331';
+const EBAY_SITE_UK = '3';
+
+const ebayConfigured = () => !!(EBAY_CLIENT_ID && EBAY_CLIENT_SECRET && EBAY_RUNAME);
+const ebayKey = () => crypto.createHash('sha256').update(`pokelister-ebay|${EBAY_CLIENT_SECRET}|${APP_PASSWORD}`).digest();
+
+function sealToken(obj) {
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', ebayKey(), iv);
+  const ct = Buffer.concat([c.update(JSON.stringify(obj), 'utf8'), c.final()]);
+  return Buffer.concat([iv, c.getAuthTag(), ct]).toString('base64url');
+}
+function openToken(blob) {
+  try {
+    const b = Buffer.from(String(blob || ''), 'base64url');
+    const d = crypto.createDecipheriv('aes-256-gcm', ebayKey(), b.subarray(0, 12));
+    d.setAuthTag(b.subarray(12, 28));
+    return JSON.parse(Buffer.concat([d.update(b.subarray(28)), d.final()]).toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+// "state" proves the eBay sign-in was started from this app in the last 30 minutes
+function signState() {
+  const t = String(Date.now());
+  return t + '.' + crypto.createHmac('sha256', ebayKey()).update(t).digest('base64url').slice(0, 22);
+}
+function stateOk(state) {
+  const [t, sig] = String(state || '').split('.');
+  if (!t || !sig) return false;
+  const good = crypto.createHmac('sha256', ebayKey()).update(t).digest('base64url').slice(0, 22);
+  return sig === good && Date.now() - Number(t) < 30 * 60 * 1000;
+}
+
+async function ebayTokenRequest(params) {
+  const basic = Buffer.from(`${EBAY_CLIENT_ID}:${EBAY_CLIENT_SECRET}`).toString('base64');
+  const { ok, status, data } = await fetchJSON('https://api.ebay.com/identity/v1/oauth2/token', {
+    method: 'POST',
+    headers: { Authorization: `Basic ${basic}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(params).toString(),
+  }, 20000);
+  if (!ok) throw new Error('eBay sign-in failed: ' + ((data && (data.error_description || data.error)) || `HTTP ${status}`));
+  return data;
+}
+
+const ebayAccess = new Map(); // hash of refresh token -> { token, exp }
+async function ebayAccessToken(sealed) {
+  const t = openToken(sealed);
+  if (!t || !t.refresh) throw Object.assign(new Error('eBay isn\'t connected on this device – connect it in Settings'), { status: 400 });
+  const k = sha(t.refresh).toString('hex');
+  const hit = ebayAccess.get(k);
+  if (hit && hit.exp > Date.now() + 60000) return hit.token;
+  const data = await ebayTokenRequest({ grant_type: 'refresh_token', refresh_token: t.refresh, scope: EBAY_SCOPES });
+  ebayAccess.set(k, { token: data.access_token, exp: Date.now() + (Number(data.expires_in) || 7200) * 1000 });
+  return data.access_token;
+}
+
+function handleEbayConnectUrl(res) {
+  if (!ebayConfigured()) return sendJSON(res, 400, { error: 'Add EBAY_CLIENT_ID, EBAY_CLIENT_SECRET and EBAY_RUNAME on Render first' });
+  const q = new URLSearchParams({ client_id: EBAY_CLIENT_ID, response_type: 'code', redirect_uri: EBAY_RUNAME, scope: EBAY_SCOPES, state: signState() });
+  sendJSON(res, 200, { url: `https://auth.ebay.com/oauth2/authorize?${q}` });
+}
+
+function callbackPage(res, script, message) {
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(`<!DOCTYPE html><meta name="viewport" content="width=device-width,initial-scale=1"><title>PokeLister</title>
+<body style="font-family:-apple-system,sans-serif;background:#111318;color:#eef0f5;padding:24px">
+<p>${message}</p><p><a style="color:#ffcb05" href="/">Back to PokeLister</a></p><script>${script}</script></body>`);
+}
+
+// eBay sends you back here after you sign in (set this page as the "auth accepted URL")
+async function handleEbayCallback(url, res) {
+  const code = url.searchParams.get('code');
+  if (!code) return callbackPage(res, '', 'eBay sign-in was cancelled. Nothing was changed.');
+  if (!stateOk(url.searchParams.get('state'))) return callbackPage(res, '', 'That sign-in link has expired. Start again from Settings.');
+  try {
+    const data = await ebayTokenRequest({ grant_type: 'authorization_code', code, redirect_uri: EBAY_RUNAME });
+    const sealed = sealToken({ refresh: data.refresh_token, at: Date.now() });
+    const expires = Date.now() + (Number(data.refresh_token_expires_in) || 47304000) * 1000;
+    const save = JSON.stringify({ token: sealed, connectedAt: Date.now(), expires });
+    callbackPage(res, `try{localStorage.setItem('pokelister.ebay.v1',${JSON.stringify(save)});}catch(e){}location.replace('/?ebay=connected');`,
+      'eBay connected. Taking you back…');
+  } catch (e) {
+    callbackPage(res, '', 'eBay sign-in failed: ' + String(e.message).replace(/[<>&]/g, ''));
+  }
+}
+
+// Your business policies, so names typed in Settings can be checked and turned into ids
+const policyCache = new Map(); // access token -> { at, data }
+async function ebayPolicies(access) {
+  const hit = policyCache.get(access);
+  if (hit && Date.now() - hit.at < 30 * 60 * 1000) return hit.data;
+  const get = async (kind, key, idKey) => {
+    const { ok, data } = await fetchJSON(`https://api.ebay.com/sell/account/v1/${kind}?marketplace_id=EBAY_GB`,
+      { headers: { Authorization: `Bearer ${access}` } }, 20000);
+    if (!ok) return null;
+    return ((data && data[key]) || []).map((p) => ({ name: p.name, id: p[idKey] }));
+  };
+  const [shipping, returns, payment] = await Promise.all([
+    get('fulfillment_policy', 'fulfillmentPolicies', 'fulfillmentPolicyId'),
+    get('return_policy', 'returnPolicies', 'returnPolicyId'),
+    get('payment_policy', 'paymentPolicies', 'paymentPolicyId'),
+  ]);
+  const data = { shipping, returns, payment };
+  if (shipping || returns || payment) policyCache.set(access, { at: Date.now(), data });
+  return data;
+}
+const findPolicy = (list, name) => (list || []).find((p) => String(p.name).trim().toLowerCase() === String(name || '').trim().toLowerCase());
+
+async function handleEbayPolicies(req, res) {
+  const body = await readJSONBody(req);
+  const access = await ebayAccessToken(body.token);
+  sendJSON(res, 200, { policies: await ebayPolicies(access) });
+}
+
+function xmlEsc(v) {
+  return String(v == null ? '' : v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+function cdata(v) {
+  return '<![CDATA[' + String(v || '').replace(/]]>/g, ']]]]><![CDATA[>') + ']]>';
+}
+
+// One card from the app -> AddFixedPriceItem XML (same fields as the live CSV)
+function buildItemXml(callName, L, ids) {
+  const specifics = Object.entries(L.specifics || {})
+    .map(([k, v]) => [String(k).trim().slice(0, 65), String(v || '').trim().slice(0, 65)])
+    .filter(([k, v]) => k && v)
+    .map(([k, v]) => `<NameValueList><Name>${xmlEsc(k)}</Name><Value>${xmlEsc(v)}</Value></NameValueList>`).join('');
+  const pics = (L.pictures || []).filter((u) => /^https:\/\//.test(u)).slice(0, 12).map((u) => `<PictureURL>${xmlEsc(u)}</PictureURL>`).join('');
+  const prof = (tag, idTag, nameTag, id, name) => (id || name)
+    ? `<${tag}>${id ? `<${idTag}>${xmlEsc(id)}</${idTag}>` : ''}${name ? `<${nameTag}>${xmlEsc(name)}</${nameTag}>` : ''}</${tag}>` : '';
+  return `<?xml version="1.0" encoding="utf-8"?>
+<${callName}Request xmlns="urn:ebay:apis:eBLBaseComponents">
+<ErrorLanguage>en_GB</ErrorLanguage><WarningLevel>High</WarningLevel>
+<Item>
+<SKU>${xmlEsc(L.sku)}</SKU>
+<Title>${xmlEsc(String(L.title || '').slice(0, 80))}</Title>
+<Description>${cdata(L.description)}</Description>
+<PrimaryCategory><CategoryID>${xmlEsc(L.categoryId || '183454')}</CategoryID></PrimaryCategory>
+<StartPrice currencyID="GBP">${xmlEsc(L.price)}</StartPrice>
+<ConditionID>4000</ConditionID>
+<ConditionDescriptors><ConditionDescriptor><Name>40001</Name><Value>${xmlEsc(L.cardCondition || '400010')}</Value></ConditionDescriptor></ConditionDescriptors>
+<Country>GB</Country><Currency>GBP</Currency>
+<ListingDuration>GTC</ListingDuration><ListingType>FixedPriceItem</ListingType>
+<Location>${xmlEsc(L.location || L.postcode)}</Location><PostalCode>${xmlEsc(L.postcode)}</PostalCode>
+<Quantity>${Math.max(1, parseInt(L.qty, 10) || 1)}</Quantity>
+${pics ? `<PictureDetails>${pics}</PictureDetails>` : ''}
+${specifics ? `<ItemSpecifics>${specifics}</ItemSpecifics>` : ''}
+${L.bestOffer ? '<BestOfferDetails><BestOfferEnabled>true</BestOfferEnabled></BestOfferDetails>' : ''}
+<SellerProfiles>
+${prof('SellerShippingProfile', 'ShippingProfileID', 'ShippingProfileName', ids.shipping, L.shippingPolicy)}
+${prof('SellerReturnProfile', 'ReturnProfileID', 'ReturnProfileName', ids.returns, L.returnPolicy)}
+${prof('SellerPaymentProfile', 'PaymentProfileID', 'PaymentProfileName', ids.payment, L.paymentPolicy)}
+</SellerProfiles>
+</Item>
+</${callName}Request>`;
+}
+
+function xmlAll(xml, tag) {
+  const out = [];
+  const re = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'g');
+  let m;
+  while ((m = re.exec(xml))) out.push(m[1]);
+  return out;
+}
+const xmlOne = (xml, tag) => xmlAll(xml, tag)[0] || '';
+const unXml = (s) => String(s).replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+
+function parseTradingResponse(xml) {
+  const errors = []; const warnings = [];
+  for (const e of xmlAll(xml, 'Errors')) {
+    const item = { code: unXml(xmlOne(e, 'ErrorCode')), message: unXml(xmlOne(e, 'LongMessage') || xmlOne(e, 'ShortMessage')) };
+    (xmlOne(e, 'SeverityCode') === 'Warning' ? warnings : errors).push(item);
+  }
+  const fees = [];
+  for (const f of xmlAll(xml, 'Fee')) {
+    const amount = parseFloat(unXml(xmlOne(f, 'Fee').replace(/<[^>]+>/g, '')) || unXml(f.replace(/^[\s\S]*<Fee[^>]*>/, '')));
+    const name = unXml(xmlOne(f, 'Name'));
+    if (name && amount > 0) fees.push({ name, amount });
+  }
+  const ack = unXml(xmlOne(xml, 'Ack'));
+  return { ack, ok: ack === 'Success' || ack === 'Warning', itemId: unXml(xmlOne(xml, 'ItemID')), errors, warnings, fees };
+}
+
+async function ebayTrading(callName, access, xml) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  try {
+    const r = await fetch(EBAY_TRADING_URL, {
+      method: 'POST',
+      headers: {
+        'X-EBAY-API-SITEID': EBAY_SITE_UK, 'X-EBAY-API-COMPATIBILITY-LEVEL': EBAY_COMPAT,
+        'X-EBAY-API-CALL-NAME': callName, 'X-EBAY-API-IAF-TOKEN': access, 'Content-Type': 'text/xml; charset=utf-8',
+      },
+      body: xml, signal: ctrl.signal,
+    });
+    return parseTradingResponse(await r.text());
+  } catch (e) {
+    return { ok: false, errors: [{ code: '', message: e.name === 'AbortError' ? 'eBay didn\'t answer in time' : 'Could not reach eBay: ' + e.message }], warnings: [], fees: [] };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// POST { token, listing, verify } -> lists one card (or with verify, only checks it)
+async function handleEbayList(req, res) {
+  const body = await readJSONBody(req);
+  const L = body && body.listing;
+  if (!L || typeof L !== 'object') return sendJSON(res, 400, { error: 'Missing listing' });
+  const access = await ebayAccessToken(body.token);
+  let ids = {};
+  try {
+    const p = await ebayPolicies(access);
+    ids = {
+      shipping: (findPolicy(p.shipping, L.shippingPolicy) || {}).id,
+      returns: (findPolicy(p.returns, L.returnPolicy) || {}).id,
+      payment: (findPolicy(p.payment, L.paymentPolicy) || {}).id,
+    };
+    if (p.shipping && L.shippingPolicy && !ids.shipping) {
+      return sendJSON(res, 200, { ok: false, errors: [{ code: 'policy', message: `No postage policy called "${L.shippingPolicy}" on your eBay account. Your postage policies are: ${p.shipping.map((x) => x.name).join(', ') || 'none'}.` }] });
+    }
+  } catch { /* fall back to the names */ }
+  const call = body.verify ? 'VerifyAddFixedPriceItem' : 'AddFixedPriceItem';
+  const out = await ebayTrading(call, access, buildItemXml(call, L, ids));
+  console.log(`ebay: ${call} ${L.sku} -> ${out.ack || 'no answer'}${out.itemId ? ' ' + out.itemId : ''}${out.errors.length ? ' ' + out.errors.map((e) => e.code).join(',') : ''}`);
+  sendJSON(res, 200, out);
 }
 
 // ---------- routes ----------
@@ -1059,8 +1308,10 @@ const server = http.createServer(async (req, res) => {
           pulseSet: !!PULSE_KEY,
           pulseCreditsLeft: PULSE_KEY ? pulseCreditsLeft() : 0,
           pulseDailyLimit: PULSE_DAILY_LIMIT,
+          ebaySet: ebayConfigured(),
         });
       }
+      if (url.pathname === '/api/ebay/callback') return await handleEbayCallback(url, res);
       if (!authorised(req)) return sendJSON(res, 401, { error: 'Wrong or missing app password' });
       if (url.pathname === '/api/auth') return sendJSON(res, 200, { ok: true });
       if (url.pathname === '/api/identify' && req.method === 'POST') return await handleIdentify(req, res);
@@ -1068,6 +1319,9 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname === '/api/photo' && req.method === 'POST') return await handlePhoto(req, res);
       if (url.pathname === '/api/pulse' && req.method === 'GET') return await handlePulse(url, res);
       if (url.pathname === '/api/match' && req.method === 'POST') return await handleMatch(req, res);
+      if (url.pathname === '/api/ebay/connect-url') return handleEbayConnectUrl(res);
+      if (url.pathname === '/api/ebay/policies' && req.method === 'POST') return await handleEbayPolicies(req, res);
+      if (url.pathname === '/api/ebay/list' && req.method === 'POST') return await handleEbayList(req, res);
       return sendJSON(res, 404, { error: 'Not found' });
     }
     return serveStatic(url.pathname, res);
@@ -1087,4 +1341,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, correctEnglishName, editDistance, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, buildItemXml, parseTradingResponse, sealToken, openToken, correctEnglishName, editDistance, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
