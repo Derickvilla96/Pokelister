@@ -473,7 +473,7 @@
         ? d.set_total : String(c.printedTotal || '');
       const hasLetters = /[A-Z]/i.test(c.number);
       const number = hasLetters || !total ? printedNum : `${printedNum}/${total}`;
-      return { name: c.name, number, set: c.setName, rarity: c.rarity, language, id: c.id };
+      return { name: c.name, number, set: c.setName || d.set_name || c.setNameLocal || '', rarity: c.rarity, language, id: c.id };
     }
     const number = d.number ? (d.set_total ? `${d.number}/${d.set_total}` : d.number) : '';
     return { name: d.name || '', number, set: d.set_name || '', rarity: d.rarity || '', language, id: '' };
@@ -487,12 +487,14 @@
     const i = cardInfo(r);
     const rarity = i.rarity || '';
     const extras = [];
-    if (i.set) extras.push(i.set);
+    // keep titles in English letters: buyers on eBay UK don't search in Chinese/Japanese script
+    const latin = (t) => !/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\u0e00-\u0e7f]/.test(t);
+    if (i.set && latin(i.set)) extras.push(i.set.replace(/\s*\((simplified|traditional)?\s*chinese\)|\s*\(japanese\)/ig, ''));
     if (r.firstEd) extras.push('1st Edition');
     if (String(r.stamp || '').trim()) extras.push('Stamped');
     const fl = finishLabel(r.finish);
     if (fl && !(r.finish === 'holo' && /holo/i.test(rarity))) extras.push(fl);
-    if (i.language && !/^english$/i.test(i.language)) extras.push(i.language);
+    if (i.language && !/^english$/i.test(i.language)) extras.push(/chinese/i.test(i.language) ? 'Chinese' : i.language);
     if (rarity && !/^(common|uncommon)$/i.test(rarity)) extras.push(rarity);
     extras.push('Pokemon Card');
     let t = [i.name, i.number].filter(Boolean).join(' ');
@@ -685,7 +687,7 @@
       'Card Number': i.number || '',
       'Rarity': i.rarity || '',
       'Finish': finish,
-      'Language': i.language || 'English',
+      'Language': /chinese/i.test(i.language || '') ? 'Chinese' : (i.language || 'English'),
       'Manufacturer': settings.specManufacturer || '',
       'Year Manufactured': year,
       'Features': [r.firstEd ? '1st Edition' : '', shortStamp(r.stamp) ? `Stamped (${shortStamp(r.stamp)})` : ''].filter(Boolean).join(', '),
@@ -942,7 +944,9 @@
 
   function candidateLabel(x) {
     const num = x.printedTotal && !/[A-Z]/i.test(x.number) ? `${x.number}/${x.printedTotal}` : x.number;
-    return `${x.name} ${num} · ${x.setName}${x.rarity ? ' · ' + x.rarity : ''}`;
+    const set = x.setName || x.setNameLocal || '';
+    const code = x.source === 'tcgdex' && x.setId ? ` (${String(x.setId).toUpperCase()})` : '';
+    return `${x.name} ${num} · ${set}${code}${x.rarity ? ' · ' + x.rarity : ''}`;
   }
 
   function photoStatusHtml(r) {
@@ -1038,7 +1042,7 @@
           <figure>${r.backPhoto ? `<img src="${r.backPhoto}" alt="Back"><figcaption>Back</figcaption>` : '<div class="missing">No back</div>'}</figure>
         </div>
         ${c && c.image ? `<img class="stock" src="${esc(c.image)}" alt="Matched card" loading="lazy">`
-          : '<div class="empty-img">No match</div>'}
+          : `<div class="empty-img">${c ? 'No picture in the database' : 'No match'}</div>`}
       </div>
       <div class="row-body">
         <div class="row-head">
@@ -1096,7 +1100,7 @@
     return el;
   }
 
-  const LANGUAGES = ['English', 'Japanese', 'Chinese', 'Korean', 'French', 'German', 'Italian', 'Spanish', 'Portuguese', 'Thai', 'Indonesian'];
+  const LANGUAGES = ['English', 'Japanese', 'Chinese (Traditional)', 'Chinese (Simplified)', 'Korean', 'French', 'German', 'Italian', 'Spanish', 'Portuguese', 'Thai', 'Indonesian'];
   function languageOpts(r) {
     const cur = (r.detected && r.detected.language) || 'English';
     const list = LANGUAGES.some((l) => l.toLowerCase() === cur.toLowerCase()) ? LANGUAGES : [cur, ...LANGUAGES];
