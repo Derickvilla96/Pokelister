@@ -51,18 +51,18 @@ Reply with ONLY a JSON object, no other text, in exactly this shape:
   "name_printed": "the name exactly as printed on the card, in its own script (e.g. ルンパッパ). Empty string if the card is in English",
   "number": "collector number before the slash, exactly as printed (keep leading zeros)",
   "set_total": "number after the slash, or empty string if there is none",
-  "set_name": "your best guess at the set name in English (for Japanese sets use the usual English name, e.g. 'Mega Dream ex', 'Terastal Festival ex'), or empty string",
-  "set_code": "set code printed on the card if visible (e.g. PAL, OBF, SVI), or empty string",
+  "set_name": "your best guess at the set name in English only (for Japanese/Chinese sets use the usual English name, e.g. 'Mega Dream ex', 'Terastal Festival ex', 'Gem Pack Vol. 3'). No language words, no codes in brackets. Empty string if unsure",
+  "set_code": "the small set code printed at the bottom-left next to the regulation letter, exactly as printed without the regulation letter (e.g. PAL, OBF, SV4a, M2a, CSV3C, CS3bC), or empty string",
   "rarity": "your best guess at the rarity",
   "finish": "one of: normal, holo, reverse holo, unknown",
   "first_edition": false,
   "stamp": "ONLY if a stamp is clearly visible on the card: its short name, max 30 characters, e.g. 'Twilight Masquerade', 'Prerelease', 'Pokémon Center', 'Staff'. Empty string if there is no stamp or you're not sure (mention a possible stamp in notes instead)",
-  "language": "the language of the PRINTED TEXT on the card: one of English, Japanese, Chinese, Korean, French, German, Italian, Spanish, Portuguese, Thai, Indonesian",
+  "language": "the language of the PRINTED TEXT on the card: one of English, Japanese, Chinese (Traditional), Chinese (Simplified), Korean, French, German, Italian, Spanish, Portuguese, Thai, Indonesian",
   "notes": "anything a seller should know: graded slab, visible damage, promo stamp, card hard to read; empty string if nothing",
   "confidence": 0.9
 }]}
 "first_edition" is true only if a 1st Edition stamp is visible. Look carefully for stamps: they are small logos or words printed on the artwork or text box (often in gold or foil). Don't count the normal set symbol next to the card number, or the 1st Edition stamp (that's "first_edition"). "confidence" is a number from 0 to 1 for how sure you are of the name AND number.
-Decide "language" from the card's printed words (name, attack names, rules text), never from the art style: lots of English cards have anime-style or Japanese-looking artwork. Japanese text uses kana (ひらがな / カタカナ) mixed with kanji; Chinese text uses only Chinese characters with no kana; Korean uses Hangul. If the attacks and rules text are in English, the card is English.
+Decide "language" from the card's printed words (name, attack names, rules text), never from the art style: lots of English cards have anime-style or Japanese-looking artwork. Japanese text uses kana (ひらがな / カタカナ) mixed with kanji; Chinese text uses only Chinese characters with no kana; Korean uses Hangul. For Chinese, look at the characters: Traditional uses forms like 寶可夢 這 個 對 擊 傷 時 (Taiwan / Hong Kong cards, set codes like SV4a); Simplified uses 宝可梦 这 个 对 击 伤 时 (mainland China cards, set codes starting CS or CSV). If the attacks and rules text are in English, the card is English.
 If the photo shows only the BACK of a card or cards (the standard blue Poké Ball back) and no card fronts, reply {"cards":[],"card_back":true}.
 If no card is visible at all, reply {"cards":[]}.`;
 
@@ -428,7 +428,7 @@ function tcgdexToCandidate(card, set, lang, d) {
     name: englishName || card.name || '',
     nameLocal: card.name || '',
     number: String(card.localId || ''),
-    setName: englishSet || cs.name || '',
+    setName: englishSet || (isLatin(cs.name) ? cs.name : ''),
     setNameLocal: cs.name || '',
     setId: String(cs.id || '').toLowerCase(),
     series: '',
@@ -445,6 +445,14 @@ function tcgdexToCandidate(card, set, lang, d) {
   };
 }
 
+// "SV4a" = "sv4a", and Chinese printings often add a trailing C ("CSV3C" / "CSV3")
+function sameSetCode(a, b) {
+  const n = (x) => String(x || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const x = n(a); const y = n(b);
+  if (!x || !y) return false;
+  return x === y || x.replace(/c$/, '') === y.replace(/c$/, '') || normSetId(x) === normSetId(y);
+}
+
 function scoreLocal(c, d) {
   let s = 0;
   if (normNumber(d.number) && normNumber(d.number) === normNumber(c.number)) s += 4;
@@ -455,6 +463,7 @@ function scoreLocal(c, d) {
   if (a && a === b) s += 3;
   else if (a && b && (a.includes(b) || b.includes(a))) s += 2;
   else if (strip(d.name) && strip(d.name) === b) s += 3;
+  if (sameSetCode(d.set_code, c.setId)) s += 3;
   return s;
 }
 
@@ -669,8 +678,20 @@ function isForeignPrinting(r) {
 // Which language a Pulse printing is: 'en' (no suffix), 'ja', 'zh', 'ko', 'th', 'id'
 const PULSE_LANG_SUFFIX = { jp: 'ja', ja: 'ja', kr: 'ko', ko: 'ko', cn: 'zh', tw: 'zh', zh: 'zh', sc: 'zh', tc: 'zh', th: 'th', id: 'id' };
 function printingLang(r) {
+  const field = String((r && (r.language || r.lang)) || '').toLowerCase();
+  if (field) {
+    const w = wantedLang(field) || (/^(ja|jp)/.test(field) ? 'ja' : /^(zh|cn|tw)/.test(field) ? 'zh' : /^(ko|kr)/.test(field) ? 'ko' : '');
+    if (w) return w;
+  }
   const m = pulseSetPart(r).match(/[_-](jp|ja|kr|ko|cn|tw|zh|sc|tc|th|id)(?:$|[_-])/);
-  return m ? PULSE_LANG_SUFFIX[m[1]] : 'en';
+  if (m) return PULSE_LANG_SUFFIX[m[1]];
+  // Some printings (e.g. Chinese) have no suffix, but their names are in their own script
+  const text = [r && r.product_id, r && r.name, r && r.product_name, r && r.set_name].filter(Boolean).join(' ');
+  if (/[\u3040-\u30ff]/.test(text)) return 'ja';
+  if (/[\uac00-\ud7af]/.test(text)) return 'ko';
+  if (/[\u4e00-\u9fff]/.test(text)) return 'zh';
+  if (/[\u0e00-\u0e7f]/.test(text)) return 'th';
+  return 'en';
 }
 // The card's language as Pulse would label it. null = don't filter (e.g. French: Pulse
 // doesn't list those separately, so behave as before).
