@@ -550,8 +550,57 @@ async function tcgdexLookup(d, langs) {
   return [];
 }
 
+// For Japanese/Chinese cards the English name comes only from the AI, which can misspell
+// it ("Helioliesk" for Heliolisk). Check it against TCGdex's English card names and fix
+// small spelling slips.
+function editDistance(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0]; prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
+    }
+  }
+  return prev[b.length];
+}
+
+async function correctEnglishName(name) {
+  const n = str(name);
+  if (!n || !isLatin(n) || n.length < 4) return n;
+  // the word to check: "Mega Gengar ex" -> "Gengar", "Team Rocket's Mewtwo" -> "Mewtwo"
+  const words = n.replace(/^.+?'s\s+/, '').split(/\s+/)
+    .filter((w) => !/^(mega|m|ex|gx|v|vmax|vstar|radiant|shiny|alolan|galarian|hisuian|paldean|dark|light|break|tag|team)$/i.test(w));
+  const word = (words[0] || '').replace(/[^A-Za-zé'.-]/g, '');
+  if (word.length < 4) return n;
+  let names = [];
+  try {
+    const list = (await tcgdexGet(`/en/cards?name=${encodeURIComponent(word.slice(0, 3))}*`)) || [];
+    names = [...new Set(list.map((c) => str(c.name)))];
+  } catch { return n; }
+  if (!names.length) return n;
+  // the Pokémon names inside those card names, e.g. "Heliolisk ex" -> "Heliolisk"
+  const pokemon = new Set();
+  for (const full of names) for (const w of full.split(/\s+/)) if (w.length >= 4 && w[0] === w[0].toUpperCase()) pokemon.add(w.replace(/[^A-Za-zé'.-]/g, ''));
+  if (pokemon.has(word)) return n;
+  let best = null; let bestD = Infinity;
+  for (const p of pokemon) {
+    const dist = editDistance(word, p);
+    if (dist < bestD) { best = p; bestD = dist; }
+  }
+  const allowed = word.length >= 8 ? 2 : 1;
+  if (best && bestD <= allowed) {
+    console.log(`name fix: "${word}" -> "${best}"`);
+    return n.replace(word, best);
+  }
+  return n;
+}
+
 async function lookupCard(d) {
   const langs = tcgdexLangs(d.language);
+  if (langs.length) d.name = await correctEnglishName(d.name);
   if (langs.length) return tcgdexLookup(d, langs);
   return lookupEnglish(d);
 }
@@ -1038,4 +1087,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
+module.exports = { server, correctEnglishName, editDistance, tcgdexLangs, tcgdexToCandidate, scoreLocal, printingLang, wantedLang, tcgdexLookup, isLatin, shortStamp, rankVersions, normSetId, cardNumberVariants, isForeignPrinting, guessSetId, pickPulseResult, sameCardNumber, pulseName, normNumber, scoreCandidate, lookupCard, toCandidate, statusFor, cleanDetected, parseLooseJSON };
