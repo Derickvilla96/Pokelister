@@ -980,10 +980,12 @@ async function pulseLookup({ name, nameLocal, number, total, setId, setLabel, la
 
   let result = null;
   const tried = [];
+  const allFound = [];
   for (const p of tries) {
     const { numberOnly, ...params } = p;
     let found = [];
     try { found = await pulseSearch(params); } catch (e) { if (e.code === 'limit' || !numberOnly) throw e; }
+    allFound.push(...found);
     tried.push({
       search: [params.q, params.card_number].filter(Boolean).join(' '),
       results: found.length,
@@ -1009,7 +1011,20 @@ async function pulseLookup({ name, nameLocal, number, total, setId, setLabel, la
     }
   }
   // explain a miss so a screenshot shows what happened
-  if (!result) result = { status: 'nomatch', tried, wanted: { number: printed, set: setLabel || setId || '', language: language || 'English' } };
+  if (!result) {
+    result = { status: 'nomatch', tried, wanted: { number: printed, set: setLabel || setId || '', language: language || 'English' } };
+    // Pulse mostly lists Simplified Chinese only. Traditional Chinese cards reuse the Japanese
+    // sets and numbers, so offer the Japanese printing's price as a stand-in (you choose).
+    if (lang === 'zh') {
+      const seen = new Set();
+      const uniq = allFound.filter((r) => { const k = r.product_id || JSON.stringify(r); if (seen.has(k)) return false; seen.add(k); return true; });
+      const jp = pickPulseResult(uniq, setId, printed, 'ja', finish, stamp);
+      if (jp) {
+        const pr = pulsePriceOf(jp.result);
+        result.japanese = { gbp: pr.gbp, basis: pr.basis, productId: jp.result.product_id || '', variant: pulseVariant(jp.result) };
+      }
+    }
+  }
   pulseCache.set(key, { at: Date.now(), result });
   return result;
 }
@@ -1193,8 +1208,8 @@ function buildItemXml(callName, L, ids) {
 <Description>${cdata(L.description)}</Description>
 <PrimaryCategory><CategoryID>${xmlEsc(L.categoryId || '183454')}</CategoryID></PrimaryCategory>
 <StartPrice currencyID="GBP">${xmlEsc(L.price)}</StartPrice>
-<ConditionID>4000</ConditionID>
-<ConditionDescriptors><ConditionDescriptor><Name>40001</Name><Value>${xmlEsc(L.cardCondition || '400010')}</Value></ConditionDescriptor></ConditionDescriptors>
+<ConditionID>${xmlEsc(L.conditionId || '4000')}</ConditionID>
+${String(L.conditionId || '4000') === '4000' ? `<ConditionDescriptors><ConditionDescriptor><Name>40001</Name><Value>${xmlEsc(L.cardCondition || '400010')}</Value></ConditionDescriptor></ConditionDescriptors>` : ''}
 <Country>GB</Country><Currency>GBP</Currency>
 <ListingDuration>GTC</ListingDuration><ListingType>FixedPriceItem</ListingType>
 <Location>${xmlEsc(L.location || L.postcode)}</Location><PostalCode>${xmlEsc(L.postcode)}</PostalCode>

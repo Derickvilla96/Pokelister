@@ -143,6 +143,14 @@ photo not uploaded, already live on eBay) and flags the rest with a Show button.
 The eBay sign-in is stored on your phone, encrypted by the server. Connect once on each device.
 Listed cards show their eBay item number; "Remove listed" clears them from PokeLister.
 
+## Upload a CSV to eBay
+
+Once eBay is connected, "📄 Upload a CSV to eBay" (under Take photo / Library) takes an eBay
+listing file (the same template PokeLister exports, edited or not) and lists every "Add" row
+straight to eBay. It puts the postage line at the top, cuts titles to 80 characters and raises
+prices below your minimum; rows with no price, photos or postage policy are left out. Rows
+already listed from a CSV (same Custom label/SKU) are never listed twice.
+
 ## Uploading to eBay
 
 1. Seller Hub → **Reports** → **Uploads** → **Upload template**, then pick the CSV.
