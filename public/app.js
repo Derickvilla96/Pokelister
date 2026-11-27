@@ -606,6 +606,9 @@
         const wanted = [p.wanted && p.wanted.number, p.wanted && p.wanted.set].filter(Boolean).join(', ');
         why = ` Searched ${looked}${wanted ? `; needed ${wanted}` : ''}.`;
       }
+      if (p.japanese) {
+        return { text: `Pulse has no Chinese price for this card. The Japanese printing with the same set and number (${p.japanese.productId.split('|').slice(0, 2).join(' ')}) is £${Number(p.japanese.gbp).toFixed(2)}. Traditional Chinese cards reuse the Japanese sets, so that's a close guide, but check it.`, bad: true, fetch: true, japanese: p.japanese };
+      }
       return { text: `Pulse couldn't confirm this card, so it didn't guess a price.${why} Type its price from the PulseTCG app, or fix the match and tap Check Pulse.`, bad: true, fetch: true };
     }
     if (p.status === 'limit') return { text: p.error || 'Daily Pulse limit reached. Type the price in.', bad: true };
@@ -667,6 +670,16 @@
     refreshDerived(r);
     rerenderRow(r);
     saveRows();
+  }
+
+  // Pulse had no Chinese price, so use the Japanese printing's price as the Pulse price
+  function useJapanesePrice(r) {
+    const j = r.pulse && r.pulse.status === 'nomatch' && r.pulse.japanese;
+    if (!j) return false;
+    r.pulseManual = Number(j.gbp).toFixed(2);
+    applyAutoPrice(r, true);
+    if (!r.titleEdited) r.title = buildTitle(r);
+    return true;
   }
 
   function applyAutoPrice(r, force) {
@@ -1068,6 +1081,7 @@
             ${showUse ? '<button class="btn small" data-a="usePrice">Apply rule</button>' : ''}
             ${(st.fetch || st.recheck) && pulseOn ? `<button class="btn small" data-a="getPulse">${st.recheck ? 'Recheck' : 'Check Pulse'}</button>` : ''}
           </div>
+          ${st.japanese && !r.pulseManual ? `<button class="btn small primary" data-a="useJapanese">Use Japanese price £${Number(st.japanese.gbp).toFixed(2)}</button>` : ''}
           ${r.pulse && r.pulse.status === 'ok' && r.pulse.versions && r.pulse.versions.length > 1 ? `
           <label class="field"><span>Pulse version (${r.pulse.versions.length} found)</span>
             <select data-f="pulseVersion">${r.pulse.versions.map((v, i) => `<option value="${i}"${v.productId === r.pulse.productId ? ' selected' : ''}>${esc(versionLabel(v))} – £${Number(v.gbp).toFixed(2)}</option>`).join('')}</select>
@@ -1502,6 +1516,10 @@
         rerenderRow(r);
         saveRows();
         fetchPulse(r);
+      } else if (a === 'useJapanese') {
+        useJapanesePrice(r);
+        rerenderRow(r);
+        saveRows();
       } else if (a === 'getPulse') {
         fetchPulse(r);
       } else if (a === 'retryMatch') {
@@ -1565,6 +1583,7 @@
   function renderBottomBar() {
     const on = ebayReady();
     $('#ebayBtn').hidden = !on;
+    $('#csvImportBtn').hidden = !on;
     // with eBay connected the CSV buttons stay, but smaller
     $('#exportBtn').classList.toggle('primary', !on);
     $('#exportBtn').textContent = on ? 'CSV' : 'Download CSV';
@@ -1906,6 +1925,7 @@
       }
       if (priceMode === 'set') { r.price = price.toFixed(2); r.priceAuto = false; }
       if (priceMode === 'rule') { const s = suggestedPrice(r); if (s) { r.price = s.gbp.toFixed(2); r.priceAuto = true; } }
+      if (priceMode === 'japanese') useJapanesePrice(r);
       if (priceMode === 'min') {
         const min = Number(settings.minPrice) || 0;
         const p = parseFloat(priceStr(r.price));
@@ -2109,6 +2129,218 @@
   }
 
 
+  // ======================================================================
+  // Upload a CSV straight to eBay (an eBay listing template, like the ones PokeLister exports)
+  // ======================================================================
+
+  const LS_IMPORTED = 'pokelister.imported.v1'; // SKU -> eBay item number, so a file can't list twice
+  let imported = load(LS_IMPORTED, {});
+  let importJob = null; // { name, items: [{ line, listing, fixes, problems, status, itemId, error }] }
+
+  function parseCSV(text) {
+    const out = []; let row = []; let cur = ''; let q = false;
+    const t = String(text).replace(/^\uFEFF/, '');
+    for (let i = 0; i < t.length; i++) {
+      const ch = t[i];
+      if (q) {
+        if (ch === '"' && t[i + 1] === '"') { cur += '"'; i++; }
+        else if (ch === '"') q = false;
+        else cur += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cur); cur = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && t[i + 1] === '\n') i++;
+        row.push(cur); out.push(row); row = []; cur = '';
+      } else cur += ch;
+    }
+    if (cur || row.length) { row.push(cur); out.push(row); }
+    return out.filter((r) => r.some((c) => String(c).trim()));
+  }
+
+  // eBay template rows -> listings the server can send (same fields as "List on eBay")
+  function listingsFromCSV(text) {
+    const table = parseCSV(text);
+    const hi = table.findIndex((r) => /^\s*\*?action/i.test(r[0] || ''));
+    if (hi < 0) throw new Error("That doesn't look like an eBay listing file (no Action column).");
+    const head = table[hi].map((h) => String(h).trim());
+    const col = (re) => head.findIndex((h) => re.test(h));
+    const c = {
+      sku: col(/^customlabel$/i), cat: col(/^\*?category$/i), title: col(/^\*?title$/i), cond: col(/^\*?conditionid$/i),
+      card: col(/^cd:card condition/i), pics: col(/^picurl$/i), desc: col(/^\*?description$/i), price: col(/^\*?startprice$/i),
+      bo: col(/^bestofferenabled$/i), qty: col(/^\*?quantity$/i), loc: col(/^location$/i), pc: col(/^postalcode$/i),
+      ship: col(/^shippingprofilename$/i), ret: col(/^returnprofilename$/i), pay: col(/^paymentprofilename$/i),
+    };
+    if (c.title < 0 || c.price < 0) throw new Error('The file needs at least Title and StartPrice columns.');
+    const specCols = head.map((h, i) => [h, i]).filter(([h]) => /^c:/i.test(h));
+    const items = [];
+    const skipped = [];
+    table.slice(hi + 1).forEach((r, k) => {
+      const line = hi + k + 2;
+      const action = String(r[0] || '').trim().toLowerCase();
+      if (!action) return;
+      if (action !== 'add') { skipped.push(`line ${line} (${r[0]})`); return; }
+      const g = (i) => (i >= 0 ? String(r[i] == null ? '' : r[i]) : '');
+      const specifics = {};
+      for (const [h, i] of specCols) { const v = g(i).trim(); if (v) specifics[h.slice(2).trim()] = v; }
+      items.push({
+        line, status: 'ready', listing: {
+          sku: g(c.sku).trim() || `CSV-${Date.now().toString(36)}-${line}`, title: g(c.title).trim(), description: g(c.desc),
+          categoryId: g(c.cat).trim() || settings.categoryId, conditionId: g(c.cond).trim() || '4000',
+          cardCondition: g(c.card).trim() || '400010', pictures: g(c.pics).split('|').map((u) => u.trim()).filter(Boolean),
+          price: g(c.price).trim(), qty: parseInt(g(c.qty), 10) || 1, specifics,
+          bestOffer: /^(1|true|yes)$/i.test(g(c.bo).trim()),
+          location: g(c.loc).trim() || settings.location || settings.postcode, postcode: g(c.pc).trim() || settings.postcode,
+          shippingPolicy: g(c.ship).trim() || settings.shippingPolicy, returnPolicy: g(c.ret).trim() || settings.returnPolicy,
+          paymentPolicy: g(c.pay).trim() || settings.paymentPolicy,
+        },
+      });
+    });
+    return { items, skipped };
+  }
+
+  // the same checks and safe fixes as the pre-upload check
+  function checkImported(it) {
+    const L = it.listing;
+    const fixes = []; const problems = [];
+    const line = String(settings.topLine || '').trim();
+    if (line) {
+      const e = esc(line).replace(/\r?\n/g, '<br>');
+      if (!L.description.startsWith(e) && !L.description.startsWith(line)) {
+        const rest = L.description.split(e).join('').split(line).join('').replace(/^(\s*<br>)+/, '');
+        L.description = e + '<br><br>' + rest;
+        fixes.push('postage line put at the top');
+      }
+    }
+    const t = L.title.replace(/\s+/g, ' ').trim();
+    if (t.length > 80) { L.title = t.slice(0, 80).trim(); fixes.push('title cut to 80 characters'); } else L.title = t;
+    if (Object.values(L.specifics).some((v) => v.length > 65)) fixes.push('item specifics cut to 65 characters');
+    const min = Number(settings.minPrice) || 0;
+    const p = parseFloat(String(L.price).replace(/[£,\s]/g, ''));
+    if (!(p > 0)) problems.push('no price');
+    else {
+      if (min && p < min) { L.price = min.toFixed(2); fixes.push(`price raised to your £${min.toFixed(2)} minimum`); }
+      else L.price = p.toFixed(2);
+    }
+    if (!L.title) problems.push('no title');
+    if (!L.pictures.some((u) => /^https:\/\//.test(u))) problems.push('no photo links');
+    if (!L.shippingPolicy) problems.push('no postage policy');
+    if (!L.postcode) problems.push('no postcode');
+    if (imported[L.sku]) problems.push(`already listed from a CSV (item ${imported[L.sku]})`);
+    it.fixes = fixes; it.problems = problems;
+    if (problems.length && it.status === 'ready') it.status = 'blocked';
+  }
+
+  async function openImport(file) {
+    try {
+      const text = await file.text();
+      const { items, skipped } = listingsFromCSV(text);
+      if (!items.length) { toast('No listings to add in that file'); return; }
+      items.forEach(checkImported);
+      importJob = { name: file.name, items, skipped, running: false };
+      renderImport();
+      openSheet('importSheet');
+    } catch (e) {
+      toast(e.message);
+    }
+  }
+
+  function renderImport() {
+    const j = importJob;
+    if (!j) return;
+    const ready = j.items.filter((i) => i.status === 'ready');
+    const done = j.items.filter((i) => i.status === 'listed');
+    const failed = j.items.filter((i) => i.status === 'failed');
+    const blocked = j.items.filter((i) => i.status === 'blocked');
+    const fixedN = j.items.filter((i) => i.fixes && i.fixes.length).length;
+    const label = (i) => `${esc(i.listing.title || i.listing.sku)} <span class="muted">£${esc(i.listing.price || '?')}</span>`;
+    const li = (i) => {
+      if (i.status === 'listed') return `<li class="ok-text">✓ ${label(i)} – <a href="https://www.ebay.co.uk/itm/${esc(i.itemId)}" target="_blank" rel="noopener">${esc(i.itemId)}</a></li>`;
+      if (i.status === 'failed') return `<li class="warn-text">✕ ${label(i)}<br><span class="small">${esc(i.error)}</span></li>`;
+      if (i.status === 'blocked') return `<li class="warn-text">– ${label(i)}<br><span class="small">Left out: ${esc(i.problems.join(', '))}</span></li>`;
+      if (i.status === 'working') return `<li>… ${label(i)}</li>`;
+      return `<li>${label(i)}${i.fixes.length ? `<br><span class="small ok-text">Fixed: ${esc(i.fixes.join(', '))}</span>` : ''}</li>`;
+    };
+    let html = `<p class="help"><strong>${esc(j.name)}</strong>: ${j.items.length} listing${j.items.length === 1 ? '' : 's'}`
+      + `${fixedN ? `, ${fixedN} fixed for you` : ''}${blocked.length ? `, ${blocked.length} left out` : ''}.`
+      + `${j.skipped.length ? ` Skipped rows that aren't "Add": ${esc(j.skipped.slice(0, 5).join(', '))}${j.skipped.length > 5 ? '…' : ''}.` : ''}</p>`;
+    if (done.length || failed.length) html += `<p class="help">${done.length} listed${failed.length ? `, ${failed.length} failed` : ''}.</p>`;
+    html += `<ul class="import-list">${j.items.map(li).join('')}</ul>`;
+    if (!ebayReady()) {
+      html += '<p class="warn-text">Connect your eBay account first (Settings → List straight to eBay).</p>';
+    } else if (ready.length && !j.running) {
+      html += `<div class="sheet-actions">
+          <button class="btn" data-imp="test">Test 1 first</button>
+          <button class="btn primary" data-imp="go">List ${ready.length} on eBay</button>
+        </div><div id="importTest" class="help"></div>`;
+    } else if (j.running) {
+      html += '<p class="help">Listing… keep this page open.</p>';
+    }
+    $('#importBody').innerHTML = html;
+  }
+
+  async function importCall(it, verify) {
+    return api('/api/ebay/list', { method: 'POST', body: JSON.stringify({ token: ebayConn && ebayConn.token, listing: it.listing, verify: !!verify }) });
+  }
+
+  async function importTest() {
+    const it = importJob && importJob.items.find((i) => i.status === 'ready');
+    const box = $('#importTest');
+    if (!it || !box) return;
+    box.textContent = `Asking eBay to check "${it.listing.title}"…`;
+    try {
+      const res = await importCall(it, true);
+      const fees = (res.fees || []).reduce((s, f) => s + f.amount, 0);
+      box.innerHTML = res.ok
+        ? `<span class="ok-text">✓ eBay accepted it (not listed). Listing fees: £${fees.toFixed(2)}.</span>`
+        : `<span class="warn-text">eBay wouldn't accept it: ${esc(ebayMsg(res))}</span>`;
+    } catch (e) {
+      box.innerHTML = `<span class="warn-text">${esc(e.message)}</span>`;
+    }
+  }
+
+  async function importGo() {
+    const j = importJob;
+    const list = j.items.filter((i) => i.status === 'ready');
+    if (!list.length || j.running) return;
+    if (!confirm(`List ${list.length} card${list.length === 1 ? '' : 's'} from ${j.name} LIVE on eBay now?`)) return;
+    j.running = true;
+    renderImport();
+    const queue = [...list];
+    const worker = async () => {
+      while (queue.length) {
+        const it = queue.shift();
+        it.status = 'working';
+        try {
+          const res = await importCall(it, false);
+          if (res.ok && res.itemId) {
+            it.status = 'listed'; it.itemId = res.itemId;
+            imported[it.listing.sku] = res.itemId;
+            store(LS_IMPORTED, imported);
+          } else { it.status = 'failed'; it.error = ebayMsg(res); }
+        } catch (e) { it.status = 'failed'; it.error = e.message; }
+        renderImport();
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    j.running = false;
+    renderImport();
+    const ok = j.items.filter((i) => i.status === 'listed').length;
+    const bad = j.items.filter((i) => i.status === 'failed').length;
+    toast(bad ? `${ok} listed, ${bad} failed – the reasons are in the list` : `All ${ok} listed on eBay ✓`);
+  }
+
+  function bindImport() {
+    $('#csvImportBtn').addEventListener('click', () => { $('#csvInput').value = ''; $('#csvInput').click(); });
+    $('#csvInput').addEventListener('change', (e) => { const f = e.target.files && e.target.files[0]; if (f) openImport(f); });
+    $('#importSheet').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-imp]');
+      if (!b) return;
+      if (b.dataset.imp === 'test') importTest();
+      if (b.dataset.imp === 'go') importGo();
+    });
+  }
+
+
   // ---------- settings ----------
 
   const SETTING_FIELDS = ['password', 'exportMode', 'categoryId', 'conditionId', 'skuPrefix', 'defaultQty',
@@ -2215,6 +2447,7 @@
 
   bindEvents();
   bindTools();
+  bindImport();
   renderList();
   renderNextHint();
   // Cards priced before the switch to Pulse's market price get re-checked once.

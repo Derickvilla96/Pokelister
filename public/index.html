@@ -30,6 +30,8 @@
     <label class="check pairs-toggle"><input type="checkbox" id="pairsMode"> Front &amp; back mode</label>
     <div id="nextHint" class="next-hint"></div>
     <p class="hint">Flat, no glare, card filling the frame works best. Binder pages work too (up to 9 cards per photo).</p>
+    <button id="csvImportBtn" class="btn small csv-import" hidden>📄 Upload a CSV to eBay</button>
+    <input id="csvInput" class="file-input" type="file" accept=".csv,text/csv,text/comma-separated-values,application/vnd.ms-excel">
     <p id="photoHostWarn" class="hint warn-text" hidden>Photo hosting isn't set up (IMGBB_API_KEY on Render), so your photos won't be added to the listings.</p>
   </section>
 
@@ -70,6 +72,17 @@
   </div>
 </div>
 
+<!-- upload a CSV straight to eBay -->
+<div id="importSheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <div class="sheet-head">
+      <h2>Upload a CSV to eBay</h2>
+      <button class="icon-btn" data-close="importSheet" aria-label="Close">✕</button>
+    </div>
+    <div id="importBody"></div>
+  </div>
+</div>
+
 <!-- bulk edit -->
 <div id="bulkSheet" class="sheet" hidden>
   <div class="sheet-inner">
@@ -91,6 +104,7 @@
           <option value="rule">Apply my pricing rule</option>
           <option value="set">Set to £…</option>
           <option value="min">Raise to my minimum if below it</option>
+          <option value="japanese">Use the Japanese price where Pulse has no Chinese one</option>
         </select></label>
       <label class="field"><span>£</span><input id="b_price" inputmode="decimal" placeholder="1.50"></label>
     </div>
